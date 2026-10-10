@@ -1,4 +1,10 @@
 /* Popup: options, staged progress log, download trigger. Talks to the content script via a Port. */
+// UI-theme probe for the toolbar icon (see content/theme.js / background.js)
+(() => {
+  const theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  chrome.storage.local.set({ theme });
+  chrome.runtime.sendMessage({ arexTheme: theme }).catch(() => { });
+})();
 const $ = s => document.querySelector(s);
 const status = $('#status');
 const btn = $('#export');
