@@ -1,0 +1,23 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  zip-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: package extension
+        run: |
+          cd extension
+          zip -r "$GITHUB_WORKSPACE/arena-transcript-export-${GITHUB_REF_NAME}.zip" . -x '.*'
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" \
+            "$GITHUB_WORKSPACE/arena-transcript-export-${GITHUB_REF_NAME}.zip" --clobber
