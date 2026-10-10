@@ -84,6 +84,11 @@ exports prose only (spoilers then skipped entirely).
 - Progress is emitted by every pipeline stage over the port (`AREX_PROGRESS`); the loader reports
   scan/page(+delta)/loading/settle/retry phases so the first (history) stage never sits silently.
 - Export is refused while `button[aria-label="Stop generating"]` exists (stream in flight).
+- Toolbar icon is theme-adaptive: Lucide `file-down` glyph (stroke `#5f6368` light / `#c7c7c7`
+  dark) rasterized per size to PNG; `background.js` (MV3 service worker) tracks
+  `matchMedia('(prefers-color-scheme: dark)')` and swaps `chrome.action.setIcon` between the two
+  sets. Manifest `icons` (management page, not runtime-adaptable) use a neutral `#80868b` set
+  readable on any card theme. Sources live as themed SVGs in `extension/icons/`.
 - Distribution: git tag `v*` → `release.yml` zips `extension/` and uploads
   `arena-transcript-export-<tag>.zip` to the GitHub Release (`--clobber`); `ci.yml` runs
   `npm test` on every push. Users install the release zip as an unpacked extension.

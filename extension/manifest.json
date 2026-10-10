@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Arena Transcript Export",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Export the current Arena.ai agent branch to Markdown: full history force-loaded, all spoilers (reasoning, tool runs) expanded.",
   "permissions": [
     "downloads",
@@ -39,9 +39,12 @@
     }
   ],
   "icons": {
-    "16": "icons/icon16.png",
-    "32": "icons/icon32.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "16": "icons/icon16-neutral.png",
+    "32": "icons/icon32-neutral.png",
+    "48": "icons/icon48-neutral.png",
+    "128": "icons/icon128-neutral.png"
+  },
+  "background": {
+    "service_worker": "background.js"
   }
 }
