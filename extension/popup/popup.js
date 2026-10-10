@@ -80,7 +80,7 @@ function onProgress(p) {
       else if (p.phase === 'page') { pagesLoaded = p.pages; setText('history', `History: ${p.pages} earlier page(s) · ${p.loaded} messages…`); }
       else if (p.phase === 'loading') setText('history', 'History: receiving older messages…');
       else if (p.phase === 'retry') setText('history', 'History: retrying a failed page load…');
-      else if (p.phase === 'settle') setText('history', `History: verifying top of branch (${p.stagnant}/3) · ${p.loaded} messages`);
+      else if (p.phase === 'settle') setText('history', `History: verifying top of branch (${p.stagnant}/${p.target || 2}) · ${p.loaded} messages`);
       else setText('history', 'History: settling…');
       break;
     case 'expand':

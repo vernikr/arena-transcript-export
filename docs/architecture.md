@@ -42,7 +42,9 @@ EXPORT_START ─▶ preflight ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoiler
    above on demand — see research). Loop: `log.scrollTo({top:0})` → the top sentinel's
    IntersectionObserver (rootMargin 200px) fires `loadEarlierMessages`; wait (≤8 s) for the message
    count or the first message id to change; click the "Load earlier messages" retry button if the
-   loader failed; finish after 3 stagnant rounds (also covers the single-page "compat" case).
+   loader failed; finish after 2 quiet rounds (windows are short: sub-page branches — likely the
+   server's non-paged "compat" mode — get quick rounds, so a fully-loaded branch is confirmed in
+   ~2–3 s instead of waiting out long timeouts).
 2. **Spoiler gate** (`expand.js`). Collapsed spoilers don't exist in the DOM (unmounted, not
    hidden), and groups mount nested collapsed children when opened → iterative passes:
    click every visible `button[aria-expanded="false"]` inside `div[role="log"]`, wait for the DOM
