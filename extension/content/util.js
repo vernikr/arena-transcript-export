@@ -63,9 +63,15 @@ AREX.stamp = (d = new Date()) =>
 AREX.chatUuid = () =>
   (typeof location !== 'undefined' && location.pathname.match(/\/agent\/([^/]+)/)?.[1]) || null;
 
+// Titles rendered twice adjacent (button + tooltip with no separator) collapse to X+X -> X.
+AREX.dedupeTitle = t => {
+  const m = String(t).match(/^(.+?)\1+$/u);
+  return (m && m[1].length >= 3 ? m[1] : String(t)).trim();
+};
+
 // Branch title: topbar holds it (possibly duplicated in a tooltip); first line only.
 AREX.chatTitle = () => {
   const bar = AREX.q('main .absolute.start-0.top-0');
   const t = (bar?.textContent || '').split('\n').map(s => s.trim()).filter(Boolean)[0];
-  return t || AREX.chatUuid() || 'transcript';
+  return (t && AREX.dedupeTitle(t)) || AREX.chatUuid() || 'transcript';
 };
