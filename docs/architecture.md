@@ -75,10 +75,16 @@ exports prose only (spoilers then skipped entirely).
   `chrome.downloads.download({ saveAs: true })`, filename
   `arena-<slug(branch title|uuid)>-<YYYYMMDD-HHmm>.md`.
 - If the popup closed mid-run, the content script falls back to an in-page `<a download>` click.
-- Progress (`AREX_PROGRESS` messages: loaded N messages / pass K, expanded M / serializing) is
-  shown in the popup; runs are serialized per tab (re-click while running = refusal).
+- The popup follows `prefers-color-scheme` with native-Chrome tokens and renders a staged
+  progress log (`ul#log`): one line per stage (history / expand / serialize), spinner → ✓,
+  granular counters from pipeline events (history pages and message counts, per-pass spoiler
+  counts, final markdown bytes) and an ok/warn summary. Options persist via `chrome.storage.sync`.
+- Progress is emitted by every pipeline stage over the port (`AREX_PROGRESS`); the loader reports
+  scan/page(+delta)/loading/settle/retry phases so the first (history) stage never sits silently.
 - Export is refused while `button[aria-label="Stop generating"]` exists (stream in flight).
-- Options persist via `chrome.storage.sync`.
+- Distribution: git tag `v*` → `release.yml` zips `extension/` and uploads
+  `arena-transcript-export-<tag>.zip` to the GitHub Release (`--clobber`); `ci.yml` runs
+  `npm test` on every push. Users install the release zip as an unpacked extension.
 
 ## Risks & mitigations
 

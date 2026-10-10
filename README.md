@@ -6,12 +6,17 @@ on scroll-up), then every spoiler is expanded — reasoning blocks, tool calls, 
 including nested groups. The left sidebar, the right preview panel and the composer are excluded
 by construction: everything is scoped to the transcript container (`div[role="log"]`).
 
-## Install (unpacked)
+## Install
 
-1. `chrome://extensions` → enable **Developer mode**.
-2. **Load unpacked** → select the `extension/` directory of this repo.
-3. Open an agent branch on `https://arena.ai/agent/…`, click the extension icon →
-   **Export branch to Markdown**.
+**From the release zip (recommended):** download `arena-transcript-export-*.zip` from the
+[latest release](https://github.com/vernikr/arena-transcript-export/releases/latest), unzip it,
+then `chrome://extensions` → enable **Developer mode** → **Load unpacked** → select the unzipped
+folder.
+
+**From source (dev):** clone this repo and load the `extension/` directory the same way.
+
+Then open an agent branch on `https://arena.ai/agent/…`, click the extension icon →
+**Export branch to Markdown**.
 
 Keep the popup open while it works (long branches take a while: history paging + spoiler passes).
 If you close it mid-run, the file is still delivered via an in-page download fallback.
@@ -22,7 +27,15 @@ If you close it mid-run, the file is still delivered via an in-page download fal
   content as headed sections with fenced code. Off = prose only (fast).
 - **Message timestamps** (default off) — append the visible message time to each heading.
 
-Progress and a completion summary (messages / expanded spoilers / warnings) show in the popup.
+The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
+progress log: history paging (rounds/pages/message counts), spoiler expansion passes
+(opened counters), and the assembled Markdown size. The final line lists messages, expanded
+spoilers and any warnings.
+
+## Releases
+
+Tags (`v*`) trigger a workflow that zips `extension/` and attaches the archive to the matching
+GitHub Release; `ci.yml` runs the test suite on every push.
 
 ## Markdown schema
 
