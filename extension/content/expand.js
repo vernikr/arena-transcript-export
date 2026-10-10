@@ -20,8 +20,9 @@ window.AREX = window.AREX || {};
 
       collapsed.forEach(b => { try { b.click(); } catch { /* detached mid-pass */ } });
       expanded += collapsed.length;
-      onProgress?.({ stage: 'expand', pass: passes + 1, clicking: collapsed.length, expanded });
+      onProgress?.({ stage: 'expand', phase: 'click', pass: passes + 1, clicking: collapsed.length, expanded });
       await AREX.settle(log);
+      onProgress?.({ stage: 'expand', phase: 'settle', pass: passes + 1, expanded });
 
       const now = AREX.messages(log).length;
       if (now < msgCount)

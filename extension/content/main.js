@@ -21,8 +21,9 @@ AREX.runExport = async function (options = {}) {
       expand = await AREX.expandAllSpoilers(log, { onProgress: progress });
     await AREX.settle(log, { quietMs: 400, maxMs: 6000 });
 
-    progress({ stage: 'serialize' });
+    progress({ stage: 'serialize', phase: 'start' });
     const markdown = AREX.serialize(log, options);
+    progress({ stage: 'serialize', phase: 'done', bytes: markdown.length });
     const leftCollapsed = AREX.qq(AREX.S.COLLAPSED, log).length;
 
     const warnings = [];
