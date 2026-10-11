@@ -24,7 +24,7 @@ AREX.runExport = async function (options = {}) {
     progress({ stage: 'serialize', phase: 'start' });
     const markdown = AREX.serialize(log, options);
     progress({ stage: 'serialize', phase: 'done', bytes: markdown.length });
-    const leftCollapsed = AREX.qq(AREX.S.COLLAPSED, log).length;
+    const leftCollapsed = options.includeToolActivity !== false ? AREX.qq(AREX.S.COLLAPSED, log).length : 0;
 
     const warnings = [];
     if (!hist.stable) warnings.push('History loading stopped before the oldest message was confirmed — the branch may be truncated.');
