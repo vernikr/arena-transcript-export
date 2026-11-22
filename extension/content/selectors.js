@@ -19,7 +19,6 @@ AREX.S = {
   TIME: 'time',
   LOADER: '[role="status"]',                    // "Loading earlier messages" spinner
   RETRY_TEXT: /load earlier messages/i,         // error-state retry (lang-dependent recovery only)
-  STREAMING: 'button[aria-label="Stop generating"]',
   OPEN_FILE: 'button[aria-label="Open file"]',
 };
 

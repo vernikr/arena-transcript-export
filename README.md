@@ -49,7 +49,7 @@ Document header: `# branch title`, source URL, export timestamp, message count. 
 
 ## Limits
 
-- Export is refused while the agent is still generating (the tail would be truncated).
+- Export is available while the agent is generating. It includes the transcript rendered when serialization runs; content generated afterward is omitted. Export again after completion to capture the final response.
 - The right preview panel is out of scope per requirements; code that exists only behind
   "open file in preview" actions is exported as the inline preview embedded in the transcript.
 - If Arena eventually introduces real DOM windowing (unloading rendered messages — none today),

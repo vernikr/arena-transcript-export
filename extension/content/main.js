@@ -9,8 +9,6 @@ AREX.runExport = async function (options = {}) {
   AREX._running = true;
   const progress = p => { try { AREX._port?.postMessage({ type: 'AREX_PROGRESS', ...p }); } catch { } };
   try {
-    if (AREX.q(AREX.S.STREAMING))
-      throw new Error('The agent is still generating. Wait for it to finish (or stop it), then export again.');
     const found = await AREX.waitFor(() => AREX.logEl(), { timeoutMs: 15000 });
     if (!found) throw new Error('Transcript not found. Open an Arena agent conversation page and retry.');
     const log = AREX.logEl();

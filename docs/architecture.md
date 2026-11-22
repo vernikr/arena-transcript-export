@@ -30,11 +30,11 @@ All scripts share one global namespace `AREX` (manifest load order = init order)
 ## Pipeline (per export request)
 
 ```
-EXPORT_START ─▶ preflight ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoilers ─▶ 3 serialize ─▶ deliver
+EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoilers ─▶ 3 serialize ─▶ deliver
                   │                 │                      │                    │
         on /agent/* page?    scroll top until        until no            Blob → popup →
-        not generating?      message count/          button[aria-        chrome.downloads
-        [role=log] ready     first-id stable ×N      expanded=false]     (saveAs); fallback:
+        [role=log] ready     message count/          button[aria-        chrome.downloads
+                             first-id stable ×N      expanded=false]     (saveAs); fallback:
                              (+ retry button)        remains (nested)    <a download> in page
 ```
 
@@ -83,7 +83,7 @@ exports prose only (spoilers then skipped entirely).
   counts, final markdown bytes) and an ok/warn summary. Options persist via `chrome.storage.sync`.
 - Progress is emitted by every pipeline stage over the port (`AREX_PROGRESS`); the loader reports
   scan/page(+delta)/loading/settle/retry phases so the first (history) stage never sits silently.
-- Export is refused while `button[aria-label="Stop generating"]` exists (stream in flight).
+- Export is allowed while the agent is generating. The file contains the DOM state read during serialization; later generated content requires another export.
 - Toolbar icon is theme-adaptive: Lucide `file-down` glyph (stroke `#5f6368` light / `#c7c7c7`
   dark) rasterized per size to PNG. MV3 service workers have no `matchMedia`, so the theme is
   probed in window contexts (`content/theme.js` on arena.ai pages + the popup on open) and

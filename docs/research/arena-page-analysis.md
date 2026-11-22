@@ -65,7 +65,8 @@ Left sidebar is `[data-sidebar="sidebar"]` (shadcn), the right preview/workspace
 `div.absolute.bottom-0.end-0.top-0` under `main`. Both sit outside `div[role="log"]`; scoping all
 queries to the log element excludes them and the composer/footer naturally.
 
-## Streaming gate
+## Streaming state
 
-While the agent generates, `button[aria-label="Stop generating"]` exists → export is refused with a
-clear error (the DOM would mutate mid-export and truncate the branch tail).
+While the agent generates, `button[aria-label="Stop generating"]` exists. The exporter does not gate
+on this control; it serializes the transcript currently rendered in the DOM. Content generated after
+serialization begins is captured by a subsequent export.
