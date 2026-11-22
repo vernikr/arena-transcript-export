@@ -3,6 +3,8 @@ window.AREX = window.AREX || {};
 
 AREX.S = {
   LOG: 'div[role="log"]',                       // transcript scroll container
+  SENTINEL: '[data-earlier-messages-sentinel]',
+  BOUNDARY: '[data-earlier-messages-boundary]',
   MSG: '[data-agent-transcript-message]',       // one turn (user or assistant)
   MSG_ID: 'data-chat-message-id',
   USER: '[data-user-message-layout]',

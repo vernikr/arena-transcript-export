@@ -93,6 +93,73 @@ function stopHeartbeat() {
   AREX._heartbeatTimer = null;
 }
 
+// Expand, serialize and release just a few messages at a time. The shared
+// openedButtons array is populated at click time so cancellation/errors during
+// expansion still restore every control opened by this export.
+AREX.processMessagesInWindows = async function (log, options = {}, { onProgress, onCleanup, windowSize = 4 } = {}) {
+  const messages = AREX.messages(log);
+  const totalMessages = messages.length;
+  const parts = [AREX.serializeHeader(totalMessages)];
+  let expandedSpoilers = 0, assembledBytes = new TextEncoder().encode(parts[0]).length, leftCollapsed = 0;
+  if (options.includeToolActivity !== false) {
+    leftCollapsed = AREX.qq(AREX.S.COLLAPSED, log).filter(button => !button.closest(AREX.S.MSG)).length;
+  }
+  const verifyMessages = () => {
+    const current = AREX.messages(log);
+    if (current.length < totalMessages || messages.some((m, i) => current[i] !== m || !m.isConnected))
+      throw new Error('Page unloaded or reordered messages during export; aborting to avoid a partial file.');
+  };
+  for (let start = 0; start < totalMessages; start += Math.max(1, windowSize)) {
+    AREX.throwIfAborted?.();
+    verifyMessages();
+    const roots = messages.slice(start, start + Math.max(1, windowSize));
+    const openedButtons = [];
+    let processedInWindow = 0;
+    try {
+      if (options.includeToolActivity !== false) {
+        const expand = await AREX.expandAllSpoilers(log, {
+          roots, openedButtons, cooperative: true,
+          settleOptions: { quietMs: 100, maxMs: 1500, attributes: false },
+          onProgress: event => onProgress?.({ stage: 'process', phase: 'expand',
+            processedMessages: start, totalMessages, expandedSpoilers: expandedSpoilers + (event.expanded || 0), assembledBytes,
+            percent: Math.round(start * 100 / totalMessages) }),
+        });
+        // Allows compatible callers that return their own array; the built-in
+        // expander normally appends to the shared array as it clicks.
+        if (expand.openedButtons && expand.openedButtons !== openedButtons)
+          for (const button of expand.openedButtons) if (!openedButtons.includes(button)) openedButtons.push(button);
+        expandedSpoilers += expand.expanded || 0;
+        leftCollapsed += roots.reduce((n, root) => n + AREX.qq(AREX.S.COLLAPSED, root).length, 0);
+      }
+      AREX.throwIfAborted?.();
+      verifyMessages();
+      for (let i = 0; i < roots.length; i++) {
+        const segment = await AREX.serializeMessageAsync(roots[i], options);
+        parts.push(segment);
+        assembledBytes += 2 + new TextEncoder().encode(segment).length;
+        processedInWindow = i + 1;
+        const processedMessages = start + processedInWindow;
+        onProgress?.({ stage: 'process', processedMessages, totalMessages, expandedSpoilers, assembledBytes,
+          percent: Math.round(processedMessages * 100 / totalMessages) });
+      }
+    } finally {
+      if (openedButtons.length) {
+        // Cleanup must finish even when progress reporting or serialization
+        // throws, and must not be interrupted by the cancellation signal.
+        await AREX.collapseOpenedSpoilers(openedButtons, { roots, cooperative: true, onProgress: event => onCleanup?.({
+          stage: 'process', phase: 'cleanup', processedMessages: start + processedInWindow,
+          totalMessages, expandedSpoilers, assembledBytes, percent: Math.round((start + processedInWindow) * 100 / totalMessages),
+          closed: event.closed, total: event.total,
+        }) });
+      }
+    }
+    verifyMessages();
+    if (start + roots.length < totalMessages) await AREX.yieldToMain();
+  }
+  AREX.throwIfAborted?.();
+  return { markdown: parts.join('\n\n') + '\n', expandedSpoilers, leftCollapsed, totalMessages };
+};
+
 AREX.runExport = async function (options = {}) {
   if (AREX._running) throw new Error('Export is already running in this tab.');
   AREX._running = true;
@@ -134,25 +201,15 @@ AREX.runExport = async function (options = {}) {
     postJob({ type: 'AREX_PROGRESS', ...event });
   };
 
-  const expandState = { openedButtons: [] };
   try {
     const found = await AREX.waitFor(() => AREX.logEl(), { timeoutMs: 15000 });
     if (!found) throw new Error('Transcript not found. Open an Arena agent conversation page and retry.');
     const log = AREX.logEl();
-
     const hist = await AREX.loadFullHistory(log, { onProgress: progress });
-    let expand = { expanded: 0, stuck: [], openedButtons: [] };
-    if (options.includeToolActivity !== false) {
-      expand = await AREX.expandAllSpoilers(log, { onProgress: progress });
-      expandState.openedButtons = expand.openedButtons || [];
-    }
-    await AREX.settle(log, { quietMs: 400, maxMs: 6000 });
-
-    progress({ stage: 'serialize', phase: 'start' });
-    const markdown = AREX.serialize(log, options);
+    const processed = await AREX.processMessagesInWindows(log, options, { onProgress: progress, onCleanup: progressBestEffort });
+    const { markdown, expandedSpoilers, leftCollapsed, totalMessages } = processed;
     const bytes = AREX.measureMarkdown(markdown).bytes;
     progress({ stage: 'serialize', phase: 'done', bytes });
-    const leftCollapsed = options.includeToolActivity !== false ? AREX.qq(AREX.S.COLLAPSED, log).length : 0;
 
     const warnings = [];
     if (!hist.stable) warnings.push('History loading stopped before the oldest message was confirmed — the branch may be truncated.');
@@ -161,7 +218,7 @@ AREX.runExport = async function (options = {}) {
     const result = {
       markdown,
       filename: 'arena-' + AREX.slug(AREX.chatTitle()) + '-' + AREX.stamp() + '.md',
-      stats: { messages: AREX.messages(log).length, expandedSpoilers: expand.expanded },
+      stats: { messages: totalMessages, expandedSpoilers },
       warnings,
     };
     progress({ stage: 'done', ...result.stats, warnings });
@@ -197,13 +254,6 @@ AREX.runExport = async function (options = {}) {
     postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error });
     throw error;
   } finally {
-    // Close only spoilers this export opened so Arena can release their large
-    // nested DOM trees and return to its prior state — also on failure/cancel.
-    if (expandState.openedButtons.length) {
-      try {
-        await AREX.collapseOpenedSpoilers(expandState.openedButtons, { onProgress: progressBestEffort });
-      } catch { /* best effort */ }
-    }
     stopHeartbeat();
     AREX._running = false;
     AREX._abortController = null;

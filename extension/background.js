@@ -495,7 +495,10 @@ function progressDetails(job) {
   if (event.stage === 'history') return { badge: event.pages ? `p${event.pages}` : '1/3', percent: null, title: `Loading history${Number.isFinite(event.loaded) ? `: ${event.loaded} msgs` : ''}…` };
   if (event.stage === 'process') return { badge: percent === null ? '2/3' : `${percent}%`, percent, title: `Scanning${percent === null ? '' : ` ${percent}%`}${counts}…` };
   if (event.stage === 'expand') return { badge: '45%', percent: 45, title: `Opening spoilers${Number.isFinite(event.expanded) ? `: ${event.expanded} opened` : ''}…` };
-  if (event.stage === 'serialize') return { badge: '75%', percent: 75, title: 'Converting Markdown…' };
+  if (event.stage === 'serialize') {
+    const percent = job.progress.some(p => p.stage === 'process') ? 100 : 75;
+    return { badge: `${percent}%`, percent, title: event.phase === 'done' ? 'Saving snapshot…' : 'Converting Markdown…' };
+  }
   if (event.stage === 'cleanup') return { badge: '90%', percent: 90, title: `Cleaning up${Number.isFinite(event.closed) && Number.isFinite(event.total) ? ` (${event.closed}/${event.total})` : ''}…` };
   if (event.stage === 'saving') return { badge: '99%', percent: 99, title: 'Saving snapshot…' };
   return { badge: '1/3', percent: null, title: 'Starting export…' };

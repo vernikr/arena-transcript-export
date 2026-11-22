@@ -5,15 +5,14 @@ window.AREX = window.AREX || {};
 (function () {
   const S = AREX.S;
 
-  AREX.expandAllSpoilers = async function (log, { onProgress, maxPasses = 60, batchSize = 25 } = {}) {
+  AREX.expandAllSpoilers = async function (log, { onProgress, maxPasses = 60, batchSize = 25, roots = [log], openedButtons = [], settleOptions, cooperative = false } = {}) {
     let expanded = 0, passes = 0, stuck = [];
     let msgCount = AREX.messages(log).length;
-    const openedButtons = [];
 
     for (; passes < maxPasses; passes++) {
       // Collapsed spoiler controls are the visible mounted representatives; their child
       // panels are unmounted while collapsed. Skip per-button computed-style reads here.
-      const collapsed = AREX.qq(S.COLLAPSED, log).filter(button =>
+      const collapsed = roots.flatMap(root => AREX.qq(S.COLLAPSED, root)).filter(button =>
         button.isConnected && button.getAttribute('aria-expanded') === 'false'
       );
       if (!collapsed.length) return { expanded, stuck, openedButtons };
@@ -32,11 +31,11 @@ window.AREX = window.AREX || {};
         }
         if ((i + 1) % batchSize === 0 || i === collapsed.length - 1) {
           onProgress?.({ stage: 'expand', phase: 'click', pass: passes + 1, clicking: clicked, openedThisPass, total: collapsed.length, expanded });
-          await AREX.sleep(0);
+          await (cooperative ? AREX.yieldToMain() : AREX.sleep(0));
           clicked = 0;
         }
       }
-      await AREX.settle(log);
+      await Promise.all(roots.map(root => AREX.settle(root, settleOptions)));
       onProgress?.({ stage: 'expand', phase: 'settle', pass: passes + 1, expanded });
 
       const now = AREX.messages(log).length;
@@ -50,7 +49,7 @@ window.AREX = window.AREX || {};
     return { expanded, stuck, openedButtons };
   };
 
-  AREX.collapseOpenedSpoilers = async function (openedButtons, { onProgress, batchSize = 25 } = {}) {
+  AREX.collapseOpenedSpoilers = async function (openedButtons, { onProgress, batchSize = 25, roots, cooperative = false } = {}) {
     let closed = 0;
     let attempted = 0;
     for (let i = openedButtons.length - 1; i >= 0; i -= 1) {
@@ -64,11 +63,11 @@ window.AREX = window.AREX || {};
       }
       if (attempted % batchSize === 0 || i === 0) {
         onProgress?.({ stage: 'cleanup', phase: 'close', closed, total: openedButtons.length });
-        await AREX.sleep(0);
+        await (cooperative ? AREX.yieldToMain() : AREX.sleep(0));
       }
     }
     const log = AREX.logEl();
-    if (closed && log) await AREX.settle(log, { quietMs: 120, maxMs: 1200 });
+    if (closed && (roots?.length || log)) await Promise.all((roots || [log]).map(root => AREX.settle(root, { quietMs: 100, maxMs: 1500, attributes: false })));
     return { closed };
   };
 })();

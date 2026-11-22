@@ -62,10 +62,14 @@ function stubFastExport(AREX, log, { onLoadFullHistory } = {}) {
     return { expanded: 4, stuck: [], openedButtons: [{ isConnected: true, getAttribute: () => 'true', click() {} }] };
   };
   AREX.settle = async () => {};
-  AREX.serialize = () => '# Captured transcript';
+  const message = log.ownerDocument.createElement('div');
+  message.setAttribute('data-agent-transcript-message', '');
+  log.append(message);
+  AREX.serializeHeader = () => '# Captured transcript';
+  AREX.serializeMessageAsync = async () => 'Captured message';
   AREX.measureMarkdown = markdown => ({ bytes: new TextEncoder().encode(markdown).length });
   AREX.qq = () => [];
-  AREX.messages = () => Array.from({ length: 25 }, () => ({}));
+  AREX.messages = () => [message];
   AREX.chatTitle = () => 'Reconnect test';
   AREX.slug = () => 'reconnect-test';
   AREX.stamp = () => '20261122-1654';
@@ -106,7 +110,7 @@ test('export streams progress and chunked result to the background job port and 
   assert.equal(jobPort.sent.find(m => m.type === 'AREX_JOB_START').chatUuid, 'reconnect-test');
   assert.ok(jobPort.sent.some(m => m.type === 'AREX_PROGRESS' && m.stage === 'history'));
   const chunks = jobPort.sent.filter(m => m.type === 'AREX_RESULT_CHUNK');
-  assert.equal(chunks.map(c => c.data).join(''), '# Captured transcript');
+  assert.equal(chunks.map(c => c.data).join(''), '# Captured transcript\n\nCaptured message\n');
   const end = jobPort.sent.find(m => m.type === 'AREX_RESULT_END');
   assert.equal(end.ok, true);
   assert.equal(end.filename, 'arena-reconnect-test-20261122-1654.md');

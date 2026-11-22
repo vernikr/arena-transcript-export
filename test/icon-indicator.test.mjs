@@ -103,3 +103,14 @@ test('restores unseen notifications and stale jobs from session', async () => {
   const stale = setup({ arexJobs: [{ tabId: 4, status: 'running', progress: [], updatedAt: Date.now() - 60000 }] });
   await wait(); assert.equal(stale.last('setBadgeText').text, '!'); assert.equal(stale.intervals.size, 0);
 });
+
+test('window completion does not regress to 75% during final serialization', async () => {
+  const h = setup(); await wait();
+  const job = await h.connect('AREX_JOB', 31);
+  await job.onMessage.emit({ type: 'AREX_JOB_START' });
+  await job.onMessage.emit({ type: 'AREX_PROGRESS', stage: 'process', processedMessages: 4, totalMessages: 4, percent: 100 });
+  await job.onMessage.emit({ type: 'AREX_PROGRESS', stage: 'serialize', phase: 'done', bytes: 100 }); await wait();
+  assert.equal(h.last('setBadgeText').text, '100%');
+  assert.match(h.last('setTitle').title, /Saving snapshot/);
+  await job.onMessage.emit({ type: 'AREX_RESULT_END', ok: true, markdown: 'ok' });
+});

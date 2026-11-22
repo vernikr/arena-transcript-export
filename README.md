@@ -2,8 +2,8 @@
 
 Chrome extension (MV3) that exports the **current Arena.ai agent branch** to a single Markdown
 file: the full history is force-loaded first (Arena pages long transcripts and mounts older pages
-on scroll-up), then every spoiler is expanded — reasoning blocks, tool calls, command outputs —
-including nested groups. The left sidebar, the right preview panel and the composer are excluded
+on scroll-up), then spoilers are expanded and serialized in small message windows — reasoning
+blocks, tool calls, command outputs — including nested groups. The left sidebar, the right preview panel and the composer are excluded
 by construction: everything is scoped to the transcript container (`div[role="log"]`).
 
 ## Install
@@ -37,7 +37,7 @@ that tab stops the in-tab task.
     the same file is present. The latest read remains complete.
   - Turn compression off to export the raw Markdown.
 
-Click **Prepare preview** to load the full history and expand spoilers. The popup then shows the
+Click **Prepare preview** to load the full history and expand spoilers as each window is processed. The popup then shows the
 exact UTF-8 Markdown size, an approximate token count, and savings against the raw export.
 Switching modes recalculates the preview locally; **Download Markdown** saves the selected version
 without loading the Arena history again. The selected mode and options are remembered.
@@ -50,8 +50,8 @@ filesystem allocation overhead.
 The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
 progress log. Reopening the popup during a scan reconnects to the task and replays retained
 progress events; the content script keeps the completed result until the background worker confirms
-that it has been saved to IndexedDB. The log includes history paging (rounds/pages/message counts), spoiler expansion passes
-(opened counters), cleanup of exporter-opened panels, and the assembled Markdown size. The final
+that it has been saved to IndexedDB. The log includes history paging (rounds/pages/message counts), per-message progress and spoiler
+counters, and the assembled Markdown size. Spoilers opened by the export are closed after each window. The final
 line lists messages, expanded spoilers and any warnings. Token counts are estimates intended for
 comparison, not an exact model-specific tokenizer result.
 
@@ -79,6 +79,10 @@ Document header: `# branch title`, source URL, export timestamp, message count. 
 - Export is available while the agent is generating. It includes the transcript rendered when serialization runs; content generated afterward is omitted. Export again after completion to capture the final response.
 - The right preview panel is out of scope per requirements; code that exists only behind
   "open file in preview" actions is exported as the inline preview embedded in the transcript.
+- On older Arena page versions without pagination markers, a completely silent load that starts later
+  than the initial 150 ms probe cannot be distinguished from a fully loaded history. If legacy paging
+  is observed, the exporter falls back to quiet rounds; a visible stuck loader or sentinel produces a
+  warning instead of silently claiming completion.
 - If Arena eventually introduces real DOM windowing (unloading rendered messages — none today),
   the exporter aborts loudly instead of writing a partial file.
 

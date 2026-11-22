@@ -18,13 +18,13 @@ extension/
   background.js            export coordinator, IndexedDB persistence and toolbar indicator
   shared/result-store.js   IndexedDB persistence for the latest raw Markdown snapshot
   content/selectors.js     AREX.S — all DOM queries in one place (page churn containment)
-  content/util.js          sleep, settle (MutationObserver quiet window), text extraction, slug
-  content/loader.js        1️⃣ history gate: force-load earlier pages via scroll-to-top
-  content/expand.js        2️⃣ spoiler gate: click-expand loop until zero collapsed
+  content/util.js          mutation waits, scoped settle, cooperative yields, text extraction, slug
+  content/loader.js        1️⃣ history gate: sentinel + mutation-driven page loading
+  content/expand.js        2️⃣ scoped spoiler expansion and cleanup
   content/markdown.js      HTML → Markdown (block-level recursive)
-  content/serialize.js     3️⃣ message walk: roles, activity items, code cards → md
+  content/serialize.js     3️⃣ zero-clone, cooperative message walk → Markdown
   content/compress.js      deterministic Lossless/Smart/Stubs transforms + UTF-8/token metrics
-  content/main.js          tab-resident orchestrator + reconnectable status/result API
+  content/main.js          tab-resident window pipeline + reconnectable status/result API
 ```
 
 Content scripts run in the isolated world and only touch the DOM; no `page JS` access needed.
@@ -33,37 +33,30 @@ All scripts share one global namespace `AREX` (manifest load order = init order)
 ## Pipeline (per export request)
 
 ```
-EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoilers ─▶ 3 serialize
-                  │                 │                      │                    │
-        on /agent/* page?    scroll top until        until no            raw Markdown
-        [role=log] ready     message count/          button[aria-              │
-                             first-id stable ×N      expanded=false]    popup size preview
-                             (+ retry button)        remains (nested)    + compression
-                                                                                │
-                                                        IndexedDB snapshot ←───┤
-                                                                                │
-                                                    download selected / retake
+EXPORT_START → load history (sentinel + MutationObserver)
+             → for each window of ≤4 messages:
+                  expand its spoilers → settle local DOM → serialize each message
+                  → close only the spoilers opened by this export
+             → background saves Markdown to IndexedDB → popup preview / download
 ```
 
-1. **History gate** (`loader.js`). Arena pages the transcript (20/turn page, earlier pages mount
-   above on demand — see research). Loop: `log.scrollTo({top:0})` → the top sentinel's
-   IntersectionObserver (rootMargin 200px) fires `loadEarlierMessages`; wait (≤8 s) for the message
-   count or the first message id to change; click the "Load earlier messages" retry button if the
-   loader failed; only the matching loading-status text counts as an active request; finish after 2
-   quiet rounds (windows are short: sub-page branches — likely the
-   server's non-paged "compat" mode — get quick rounds, so a fully-loaded branch is confirmed in
-   ~2–3 s instead of waiting out long timeouts).
-2. **Spoiler gate** (`expand.js`). Collapsed spoilers don't exist in the DOM (unmounted, not
-   hidden), and groups mount nested collapsed children when opened → iterative passes:
-   click `button[aria-expanded="false"]` inside `div[role="log"]` in batches of 25, yielding
-   between batches so the page can render and report progress; avoid a computed-style read per
-   button. Wait for the DOM to settle (MutationObserver quiet ≥250 ms, cap 3 s), then repeat.
-   Stop on an empty pass; bail with a warning if a pass makes no progress (stuck/disabled buttons).
-   Message count is re-checked after each pass — a change signals unexpected remounting (future
-   windowing) and aborts export loudly. Keep the references to buttons opened by this run.
-3. **Serialization** (`serialize.js` + `markdown.js`). Order-preserving walk over
-   `[data-agent-transcript-message]`, role by presence of `[data-user-message-layout]`.
-   Everything stays inside `[role="log"]` ⇒ sidebar/preview/composer never enter the output.
+1. **History gate** (`loader.js`). Scroll the Arena sentinel into view and observe mutations
+   instead of polling. Once Arena unmounts its sentinel and boundary, finish without extra quiet
+   rounds; an initially marker-free view receives a short 150 ms probe. If pagination is observed
+   on an older marker-free page, use the legacy quiet-round fallback. A stuck loader or a still
+   mounted sentinel when the retry limit is reached results in an incomplete-history warning.
+   Because initial marker absence is indistinguishable from an old implementation that starts
+   loading silently after the probe, the latter remains a compatibility limitation.
+2. **Windowed spoiler processing** (`expand.js`, `main.js`). Expand only the current four
+   messages, in batches, and observe their local DOM with attributes ignored. Serialize the
+   window, then close only controls this export opened, in reverse order, even on error or cancel.
+   Already-open controls remain open. Message identity/order is checked during processing to avoid
+   silently exporting a branch which unloaded messages.
+3. **Serialization** (`serialize.js` + `markdown.js`). Walk messages in order without cloning
+   mounted panels; the synchronous compatibility API and cooperative async walker share the same
+   rendering logic. The async walker yields on a ~20 ms budget between DOM nodes, using
+   `scheduler.yield` or `MessageChannel` when available, and reports processed messages and bytes.
+   Individual large text/code conversion operations still run synchronously.
 
 ### DOM → Markdown mapping
 
@@ -145,7 +138,7 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
 | Tailwind class churn (`prose`, `max-w-3xl`, card colors) | depend on stable data/aria hooks only; classes used solely within fixture-tested heuristics with fallbacks |
 | Arena adds DOM windowing later | abort if message count shrinks mid-run; research shows none today |
 | Unknown activity block types (plans, diffs, reasoning variants) | generic fallbacks: labeled-card, any-`pre`, text-row; headers are free-text |
-| Huge branches (RAM, message-size limits) | expansion is still needed for hidden content; process in batches, then close exporter-opened panels immediately after serialization; the background worker saves the raw snapshot in IndexedDB |
+| Huge branches (RAM, message-size limits) | hidden content is expanded in four-message windows and exporter-opened panels are closed after each window; the background worker saves the raw snapshot in IndexedDB |
 | Popup closes during scan | task survives while the Arena tab remains open; popup reconnects and restores progress/result; closing or reloading the Arena tab ends the task |
 | i18n of "Loading earlier messages" | status text is matched explicitly; keep it aligned with the active Arena locale |
 

@@ -17,31 +17,41 @@ window.AREX = window.AREX || {};
   const fenceLang = badge => LANG_MAP[badge] || (badge || '').toLowerCase() || 'text';
 
   const heading = (level, text) => `${'#'.repeat(Math.min(level, 6))} ${text}`;
-  const scrub = (el, extra = '') => {
-    const c = el.cloneNode(true);
-    c.querySelectorAll(`svg, ${S.SKIP_GUTTER}${extra ? ', ' + extra : ''}`).forEach(n => n.remove());
-    return c;
-  };
-  // Code text: innerText keeps line breaks of span-split highlight rows; gutter stripped first.
+  const skipChrome = el => el.tagName?.toLowerCase() === 'svg' || el.matches(S.SKIP_GUTTER);
+  const normalized = text => text.replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+  const cleanText = (el, { spaced = false, openFile = false } = {}) => AREX.filteredText(el, {
+    spaced, skip: n => skipChrome(n) || (openFile && n.matches(S.OPEN_FILE)),
+  });
+  // The old serializer read innerText on a detached clone. Chromium returns
+  // textContent for detached elements (not the rendered live innerText), so
+  // textContent is the parity-preserving fast path, including line endings.
   const codeText = el => {
-    const c = el.cloneNode(true);
-    c.querySelectorAll(`svg, button, ${S.SKIP_GUTTER}`).forEach(n => n.remove());
-    return (c.innerText ?? c.textContent ?? '').replace(/\n+$/g, '');
+    if (!el.querySelector('svg, button, ' + S.SKIP_GUTTER))
+      return (el.textContent ?? '').replace(/\n+$/g, '');
+    return AREX.filteredText(el, { skip: n => skipChrome(n) || n.tagName === 'BUTTON' }).replace(/\n+$/g, '');
   };
 
-  const isItemWrapper = el =>
-    el.tagName === 'DIV' && !!q(':scope > ' + S.EXPANDABLE, el);
+  const isItemWrapper = el => {
+    if (el.tagName !== 'DIV') return false;
+    for (const child of el.children) if (child.matches(S.EXPANDABLE)) return true;
+    return false;
+  };
 
   // File chip / artifact card: a `[role=button]` row carrying a lang badge ("ci.yml YAML",
   // "… Plan MD"). Body may hold a rendered document (.prose), a <pre>, or a code preview.
   function fileChip(el) {
     let chip = null;
     if (el.matches?.(S.FILE_CHIP)) chip = el;
-    else if ((el.children?.length || 0) <= 3 && !q(S.EXPANDABLE, el))
-      chip = [...el.children].find(c => c.matches?.(S.FILE_CHIP)) || null;
+    else if (el.children?.length && el.children.length <= 3) {
+      const candidate = [...el.children].find(c => c.matches?.(S.FILE_CHIP));
+      if (candidate && !q(S.EXPANDABLE, el)) chip = candidate;
+    }
     if (!chip) return null;
-    const clone = scrub(chip, S.OPEN_FILE);
-    const spans = qq('span', clone).map(s => txt(s)).filter(Boolean);
+    const spans = qq('span', chip).filter(span => {
+      for (let n = span; n && n !== chip; n = n.parentElement)
+        if (skipChrome(n) || n.matches(S.OPEN_FILE)) return false;
+      return true;
+    }).map(span => normalized(cleanText(span, { openFile: true }))).filter(Boolean);
     let lang = null, name = null;
     for (const t of spans) {
       if (LANG_BADGE.test(t)) { lang = t; break; }
@@ -50,10 +60,42 @@ window.AREX = window.AREX || {};
     return lang && name ? { name, lang, host: el, chip } : null;
   }
 
-  const isLeafRow = el =>
-    !el.matches?.(S.FILE_CHIP) &&
-    el.querySelector('svg') && !el.querySelector('div, button, pre') &&
-    !S.CARD_LABELS.includes(txt(scrub(el)).toLowerCase());
+  // Classify and collect the label in one pass, so the walker need not scrub
+  // the same row twice. A null result means it is not a leaf row.
+  function leafText(el) {
+    if (el.matches?.(S.FILE_CHIP)) return null;
+    let hasSvg = false, blocked = false;
+    const visit = n => {
+      if (n.nodeType === 3) return { plain: n.nodeValue, spaced: n.nodeValue };
+      if (n.nodeType !== 1) return { plain: '', spaced: '' };
+      const plain = [], spaced = [];
+      for (const child of n.childNodes) {
+        if (child.nodeType === 1) {
+          const tag = child.tagName.toLowerCase();
+          if (tag === 'div' || tag === 'button' || tag === 'pre') { blocked = true; return { plain: '', spaced: '' }; }
+          if (tag === 'svg') {
+            hasSvg = true;
+            // Even SVG descendants are checked for forbidden HTML containers.
+            if (child.querySelector('div, button, pre')) blocked = true;
+            continue;
+          }
+          if (child.matches(S.SKIP_GUTTER)) {
+            if (child.querySelector('svg')) hasSvg = true;
+            if (child.querySelector('div, button, pre')) blocked = true;
+            continue;
+          }
+        }
+        const value = visit(child);
+        if (blocked) return { plain: '', spaced: '' };
+        plain.push(value.plain); spaced.push(value.spaced);
+      }
+      return { plain: plain.join(''), spaced: spaced.join(' ') };
+    };
+    const value = visit(el);
+    return blocked || !hasSvg || S.CARD_LABELS.includes(normalized(value.plain).toLowerCase())
+      ? null : value.spaced.replace(/\s+/g, ' ').trim();
+  }
+  const isLeafRow = el => leafText(el) !== null;
 
   const footerOf = el => {
     if (!q(S.TIME, el) || q(S.EXPANDABLE, el) || q(S.CARD_PRE, el) || q(S.PROSE, el)) return null;
@@ -61,24 +103,22 @@ window.AREX = window.AREX || {};
   };
 
   // Uppercase label chip (command/stdout/stderr) of the card containing `pre`.
-  function cardLabel(pre, boundary) {
+  function cardLabel(pre, boundary, cache = new WeakMap()) {
     let node = pre;
     while (node.parentElement && node !== boundary && !isItemWrapper(node)) {
       node = node.parentElement;
-      const chip = qq('span', node).find(s => S.CARD_LABELS.includes(txt(s).toLowerCase()));
-      if (chip) return txt(chip).toLowerCase();
+      let label = cache.get(node);
+      if (label === undefined) {
+        label = '';
+        for (const span of node.getElementsByTagName('span')) {
+          const text = txt(span).toLowerCase();
+          if (S.CARD_LABELS.includes(text)) { label = text; break; }
+        }
+        cache.set(node, label);
+      }
+      if (label) return label;
     }
     return '';
-  }
-
-  function renderItem(wrapper, level, opts) {
-    const head = AREX.headerText(wrapper) || 'details';
-    const panel = [...wrapper.children].find(c => c.matches?.(S.PANEL)) || null;
-    const collapsed = qq(':scope > ' + S.COLLAPSED, wrapper).length > 0;
-    const out = [heading(level, head)];
-    if (panel) walkInto(panel, level + 1, out, opts);
-    else if (collapsed) out.push('_(not expanded)_');
-    return out.filter(Boolean).join('\n\n');
   }
 
   function renderFileChip(el, chip) {
@@ -92,29 +132,55 @@ window.AREX = window.AREX || {};
   }
 
   function renderPlainChip(el) {
-    const t = AREX.spacedText(scrub(el, S.OPEN_FILE));
+    const t = cleanText(el, { spaced: true, openFile: true }).replace(/\s+/g, ' ').trim();
     return t ? '- ' + t : '';
   }
 
-  // DFS with handle-or-descend; pushes Markdown blocks in reading order.
-  function walkInto(root, level, out, opts, boundary = root) {
-    const walk = el => {
-      if (footerOf(el)) return;
-      if (isItemWrapper(el)) { if (opts.includeToolActivity !== false) out.push(renderItem(el, level, opts)); return; }
+  // Precompute footer ancestors from the usually tiny set of <time> nodes,
+  // rather than running four descendant selectors on every visited DOM node.
+  function footerSet(message) {
+    const found = new WeakSet();
+    for (const time of qq(S.TIME, message)) {
+      for (let node = time; node && node !== message; node = node.parentElement)
+        if (footerOf(node)) found.add(node);
+    }
+    return found;
+  }
+
+  // Generator checkpoints allow the async path to yield during even a single
+  // very large message. The synchronous public serializer consumes the same
+  // walker, preserving ordering and formatting byte-for-byte.
+  function* walkSteps(root, level, out, opts, footers, labels, boundary = root) {
+    function* walk(el) {
+      yield;
+      if (footers.has(el)) return;
+      if (isItemWrapper(el)) {
+        if (opts.includeToolActivity !== false) {
+          const head = AREX.headerText(el) || 'details';
+          const panel = [...el.children].find(c => c.matches?.(S.PANEL)) || null;
+          const collapsed = [...el.children].some(c => c.matches?.(S.COLLAPSED));
+          const nested = [heading(level, head)];
+          if (panel) yield* walkSteps(panel, level + 1, nested, opts, footers, labels);
+          else if (collapsed) nested.push('_(not expanded)_');
+          out.push(nested.filter(Boolean).join('\n\n'));
+        }
+        return;
+      }
       if (el.matches?.(S.PROSE)) { out.push(AREX.mdConvert(el)); return; }
       const chip = fileChip(el);
       if (chip) { out.push(renderFileChip(el, chip)); return; }
       if (el.tagName === 'PRE') {
-        const lbl = cardLabel(el, boundary);
+        const lbl = cardLabel(el, boundary, labels);
         const lang = lbl === 'command' ? 'bash' : 'text';
         out.push([lbl ? `**${lbl}:**` : '', AREX.mdFence(codeText(el), lang)].filter(Boolean).join('\n\n'));
         return;
       }
       if (el.matches?.(S.FILE_CHIP)) { const line = renderPlainChip(el); if (line) out.push(line); return; }
-      if (isLeafRow(el)) { const t = AREX.spacedText(scrub(el)); if (t) out.push('- ' + t); return; }
-      for (const c of el.children || []) walk(c);
-    };
-    for (const c of root.children || []) walk(c);
+      const leaf = leafText(el);
+      if (leaf !== null) { if (leaf) out.push('- ' + leaf); return; }
+      for (const c of el.children || []) yield* walk(c);
+    }
+    for (const c of root.children || []) yield* walk(c);
   }
 
   function msgTimestamp(m) {
@@ -128,35 +194,53 @@ window.AREX = window.AREX || {};
     const body = [];
     if (names.length) body.push(`📎 **Attached:** ${names.join(', ')}`);
     const prose = qq(S.PROSE, layout);
-    body.push(prose.length ? prose.map(p => AREX.mdConvert(p)).filter(Boolean).join('\n\n') : txt(scrub(layout)));
+    body.push(prose.length ? prose.map(p => AREX.mdConvert(p)).filter(Boolean).join('\n\n') : normalized(cleanText(layout)));
     return body.filter(Boolean).join('\n\n');
   }
 
-  function renderAssistant(m, opts) {
-    const out = [];
-    walkInto(m, 4, out, opts);
-    return out.filter(Boolean).join('\n\n');
+  function messageHeader(m, opts) {
+    const user = !!q(S.USER, m);
+    const head = user ? '## 👤 User' : '## 🤖 Assistant';
+    const ts = opts.timestamps ? msgTimestamp(m) : '';
+    return { user, head: ts ? `${head}  \n_${ts}_` : head };
   }
+
+  AREX.serializeHeader = function (count) {
+    return [`# ${AREX.chatTitle()}`, '', `- Source: ${location.href}`,
+      `- Exported: ${new Date().toISOString()}`, `- Messages: ${count}`, '', '---'].join('\n');
+  };
+
+  AREX.serializeMessage = function (m, opts = {}) {
+    const { user, head } = messageHeader(m, opts);
+    const out = [];
+    if (user) out.push(renderUser(m, opts));
+    else for (const _ of walkSteps(m, 4, out, opts, footerSet(m), new WeakMap())) { /* consume synchronously */ }
+    const body = out.filter(Boolean).join('\n\n');
+    return [head, body].filter(Boolean).join('\n\n');
+  };
+
+  AREX.serializeMessageAsync = async function (m, opts = {}, budgetMs = 20) {
+    const { user, head } = messageHeader(m, opts);
+    const out = [];
+    if (user) out.push(renderUser(m, opts));
+    else {
+      let start = performance.now();
+      for (const _ of walkSteps(m, 4, out, opts, footerSet(m), new WeakMap())) {
+        if (performance.now() - start >= budgetMs) {
+          AREX.throwIfAborted?.();
+          await AREX.yieldToMain();
+          start = performance.now();
+        }
+      }
+    }
+    AREX.throwIfAborted?.();
+    const body = out.filter(Boolean).join('\n\n');
+    return [head, body].filter(Boolean).join('\n\n');
+  };
 
   AREX.serialize = function (log, opts = {}) {
     const msgs = AREX.messages(log);
-    const meta = [
-      `# ${AREX.chatTitle()}`,
-      '',
-      `- Source: ${location.href}`,
-      `- Exported: ${new Date().toISOString()}`,
-      `- Messages: ${msgs.length}`,
-      '', '---',
-    ].join('\n');
-    const parts = [meta];
-    for (const m of msgs) {
-      const user = !!q(S.USER, m);
-      const head = user ? '## 👤 User' : '## 🤖 Assistant';
-      const ts = opts.timestamps ? msgTimestamp(m) : '';
-      const body = (user ? renderUser : renderAssistant)(m, opts);
-      parts.push([ts ? `${head}  \n_${ts}_` : head, body].filter(Boolean).join('\n\n'));
-    }
-    return parts.join('\n\n') + '\n';
+    return [AREX.serializeHeader(msgs.length), ...msgs.map(m => AREX.serializeMessage(m, opts))].join('\n\n') + '\n';
   };
 
   // exposed for unit tests

@@ -3,15 +3,52 @@ window.AREX = window.AREX || {};
 
 AREX.sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Wait until `root` produces no mutations for `quietMs` (cap `maxMs`).
-AREX.settle = (root, { quietMs = 250, maxMs = 3000 } = {}) =>
+// Wait for quiet DOM changes, with an absolute cap. Windowed processing can
+// ignore attribute-only animation churn; both timers are always released.
+AREX.settle = (root, { quietMs = 250, maxMs = 3000, attributes = true } = {}) =>
   new Promise(resolve => {
-    let done = false;
-    const finish = () => { if (!done) { done = true; obs.disconnect(); resolve(); } };
-    const obs = new MutationObserver(() => { clearTimeout(t); t = setTimeout(finish, quietMs); });
-    let t = setTimeout(finish, quietMs);
-    obs.observe(root, { childList: true, subtree: true, attributes: true });
-    setTimeout(finish, maxMs);
+    let done = false, quietTimer, maxTimer;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(quietTimer); clearTimeout(maxTimer); obs.disconnect(); resolve();
+    };
+    const obs = new MutationObserver(() => { clearTimeout(quietTimer); quietTimer = setTimeout(finish, quietMs); });
+    obs.observe(root, { childList: true, subtree: true, attributes });
+    quietTimer = setTimeout(finish, quietMs);
+    maxTimer = setTimeout(finish, maxMs);
+  });
+
+// Yield without background-tab timer clamping when scheduler/MessageChannel is available.
+AREX.yieldToMain = () => {
+  if (globalThis.scheduler?.yield) return globalThis.scheduler.yield();
+  if (typeof MessageChannel !== 'undefined') return new Promise(resolve => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => { channel.port1.close(); channel.port2.close(); resolve(); };
+    channel.port2.postMessage(null);
+  });
+  return AREX.sleep(0);
+};
+
+// Mutation-driven wait; subscribe before checking so synchronous scroll/click
+// changes cannot be missed. Cancellation disconnects the observer immediately.
+AREX.waitForDomChange = (root, cond, { timeoutMs = 2500, signal = AREX._abortController?.signal } = {}) =>
+  new Promise((resolve, reject) => {
+    let timer, done = false;
+    const finish = (value, error) => {
+      if (done) return;
+      done = true; clearTimeout(timer); observer.disconnect();
+      signal?.removeEventListener('abort', abort);
+      if (error) reject(error); else resolve(value);
+    };
+    const abort = () => { const error = new Error('Export cancelled.'); error.name = 'AbortError'; finish(false, error); };
+    const check = () => { try { if (cond()) finish(true); } catch (error) { finish(false, error); } };
+    const observer = new MutationObserver(check);
+    observer.observe(root, { childList: true, subtree: true, attributes: true, characterData: true,
+      attributeFilter: ['role', 'data-earlier-messages-sentinel', 'data-earlier-messages-boundary', 'data-chat-message-id'] });
+    timer = setTimeout(() => { try { finish(Boolean(cond())); } catch (error) { finish(false, error); } }, timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort(); else check();
   });
 
 // Wait for `cond()` to hold, polling. Returns true if met within timeout.
@@ -39,13 +76,25 @@ AREX.spacedText = el => {
 
 AREX.text = el => (el?.textContent ?? '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
 
-// Spoiler header text = wrapper text minus mounted panel bodies and icons.
-AREX.headerText = wrapper => {
-  const clone = wrapper.cloneNode(true);
-  AREX.qq(AREX.S.PANEL, clone).forEach(p => p.remove());
-  clone.querySelectorAll('svg, ' + AREX.S.OPEN_FILE).forEach(s => s.remove());
-  return AREX.spacedText(clone);
+// Read text without cloning a potentially enormous mounted spoiler subtree.
+// Removed descendants do not contribute separator spaces, matching clone+remove.
+AREX.filteredText = (root, { skip = () => false, spaced = false } = {}) => {
+  const walk = node => {
+    if (node.nodeType === 3) return node.nodeValue;
+    if (node.nodeType !== 1) return '';
+    const pieces = [];
+    for (const child of node.childNodes) {
+      if (child.nodeType === 1 && skip(child)) continue;
+      pieces.push(walk(child));
+    }
+    return pieces.join(spaced ? ' ' : '');
+  };
+  return walk(root);
 };
+AREX.headerText = wrapper => AREX.filteredText(wrapper, {
+  spaced: true,
+  skip: el => el.matches(AREX.S.PANEL) || el.tagName === 'svg' || el.tagName === 'SVG' || el.matches(AREX.S.OPEN_FILE),
+}).replace(/\s+/g, ' ').trim();
 
 AREX.msgId = m => m.getAttribute(AREX.S.MSG_ID) || '';
 

@@ -32,7 +32,7 @@ const banner = $('#backgroundJobBanner');
 const bannerText = $('#backgroundJobBannerText');
 const bannerSwitch = $('#backgroundJobSwitch');
 
-const STAGE_ORDER = ['history', 'expand', 'serialize', 'cleanup'];
+const STAGE_ORDER = ['history', 'expand', 'process', 'serialize', 'cleanup'];
 const STAGE_PERCENT = { history: 10, expand: 45, serialize: 75, cleanup: 90, done: 100, cancel: 100 };
 const MODE_DESCRIPTIONS = {
   lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block.',
@@ -199,7 +199,8 @@ function markStagesFailed() {
 
 function onProgress(message) {
   if (currentTabId != null && message.tabId != null && message.tabId !== currentTabId) return;
-  if (STAGE_PERCENT[message.stage] != null) updatePercent(message.stage);
+  if (message.stage === 'serialize' && lines.process) setProgressPercent(100);
+  else if (STAGE_PERCENT[message.stage] != null) updatePercent(message.stage);
   switch (message.stage) {
     case 'history':
       if (message.phase === 'scan') setText('history', 'History: checking for earlier messages… (round ' + message.round + ', ' + message.loaded + ')');
@@ -213,6 +214,10 @@ function onProgress(message) {
       setText('expand', message.phase === 'settle'
         ? 'Spoilers: pass ' + message.pass + ', rendering… (' + message.expanded + ' opened)'
         : 'Spoilers: pass ' + message.pass + ', opening ' + message.openedThisPass + '/' + message.total + '… (' + message.expanded + ' total)');
+      break;
+    case 'process':
+      setProgressPercent(message.percent ?? 0);
+      setText('process', 'Scanning: ' + message.processedMessages + '/' + message.totalMessages + ' messages · ' + message.expandedSpoilers + ' spoilers…');
       break;
     case 'serialize':
       setText('serialize', message.phase === 'done'
