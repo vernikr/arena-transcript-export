@@ -124,7 +124,10 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
 - The popup follows `prefers-color-scheme` with native-Chrome tokens and renders a staged
   progress log (`ul#log`): one line per stage (history / expand / serialize / cleanup), spinner → ✓,
   granular counters from pipeline events (history pages and message counts, per-pass spoiler
-  counts, final markdown bytes) and an ok/warn summary. Options persist via `chrome.storage.sync`.
+  counts, final markdown bytes) and an ok/warn summary. The scan percentage counts each serialized
+  message and each spoiler to expand as one work unit; nested spoiler totals are added as their
+  parent panels reveal them, while a high-water mark prevents percentage regressions. Options persist
+  via `chrome.storage.sync`.
 - Progress is emitted by every pipeline stage over the port and retained in the tab; reconnecting
   popups receive a status snapshot plus the retained event list. The loader reports
   scan/page(+delta)/loading/settle/retry phases so the first (history) stage never sits silently.

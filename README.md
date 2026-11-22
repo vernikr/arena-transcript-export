@@ -53,8 +53,11 @@ filesystem allocation overhead.
 The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
 progress log. Reopening the popup during a scan reconnects to the task and replays retained
 progress events; the content script keeps the completed result until the background worker confirms
-that it has been saved to IndexedDB. The log includes history paging (rounds/pages/message counts), per-message progress and spoiler
-counters, and the assembled Markdown size. Spoilers opened by the export are closed after each window. The final
+that it has been saved to IndexedDB. During scanning, the percentage counts one work unit per
+serialized message and per spoiler to expand; nested spoilers are added to the total when their
+parent panels reveal them, without making the displayed percentage move backwards. The log includes
+history paging (rounds/pages/message counts), per-message progress and spoiler counters, and the
+assembled Markdown size. Spoilers opened by the export are closed after each window. The final
 line lists messages, expanded spoilers and any warnings. Token counts are estimates intended for
 comparison, not an exact model-specific tokenizer result.
 

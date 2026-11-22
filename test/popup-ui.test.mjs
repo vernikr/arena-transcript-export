@@ -218,6 +218,12 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   assert.equal(r$('#cancel').hidden, false);
   assert.match(r$('#log').textContent, /3 earlier page/);
   assert.match(r$('#status').textContent, /scan continued in the Arena tab/);
+  resumedMessageHandler({
+    type: 'AREX_PROGRESS', tabId: 1, stage: 'process', processedMessages: 2, totalMessages: 4,
+    expandedSpoilers: 5, totalSpoilers: 9, percent: 42,
+  });
+  assert.match(r$('#log').textContent, /Scanning: 2\/4 messages · 5\/9 spoilers · 42%/);
+  assert.equal(r$('#progressBar').getAttribute('aria-valuenow'), '42');
 
   reopened.window.close();
 });

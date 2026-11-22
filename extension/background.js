@@ -527,12 +527,19 @@ function indicatorState() {
 
 function progressDetails(job) {
   const event = [...job.progress].reverse().find(p => p.stage && !['cancel', 'done'].includes(p.stage)) || {};
-  const counts = Number.isFinite(event.processedMessages) && Number.isFinite(event.totalMessages) && event.totalMessages > 0
-    ? ` (${event.processedMessages}/${event.totalMessages} msgs)` : '';
+  const messageCounts = Number.isFinite(event.processedMessages) && Number.isFinite(event.totalMessages) && event.totalMessages > 0
+    ? `${event.processedMessages}/${event.totalMessages} msgs` : '';
+  const spoilerCounts = Number.isFinite(event.expandedSpoilers)
+    ? Number.isFinite(event.totalSpoilers) && event.totalSpoilers > 0
+      ? `${event.expandedSpoilers}/${event.totalSpoilers} spoilers`
+      : `${event.expandedSpoilers} spoilers`
+    : '';
+  const counts = [messageCounts, spoilerCounts].filter(Boolean).join(' · ');
   let percent = Number.isFinite(event.percent) ? Math.max(0, Math.min(100, Math.round(event.percent))) : null;
-  if (percent === null && counts) percent = Math.max(0, Math.min(100, Math.round(event.processedMessages / event.totalMessages * 100)));
+  if (percent === null && messageCounts) percent = Math.max(0, Math.min(100, Math.round(event.processedMessages / event.totalMessages * 100)));
   if (event.stage === 'history') return { badge: event.pages ? `p${event.pages}` : '1/3', percent: null, title: `Loading history${Number.isFinite(event.loaded) ? `: ${event.loaded} msgs` : ''}…` };
-  if (event.stage === 'process') return { badge: percent === null ? '2/3' : `${percent}%`, percent, title: `Scanning${percent === null ? '' : ` ${percent}%`}${counts}…` };
+  if (event.stage === 'process') return { badge: percent === null ? '2/3' : `${percent}%`, percent,
+    title: `Scanning${percent === null ? '' : ` ${percent}%`}${counts ? ` (${counts})` : ''}…` };
   if (event.stage === 'expand') return { badge: '45%', percent: 45, title: `Opening spoilers${Number.isFinite(event.expanded) ? `: ${event.expanded} opened` : ''}…` };
   if (event.stage === 'serialize') {
     const percent = job.progress.some(p => p.stage === 'process') ? 100 : 75;

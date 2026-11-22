@@ -128,8 +128,28 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
   const messages = AREX.messages(log);
   const totalMessages = messages.length;
   const parts = [AREX.serializeHeader(totalMessages)];
+  const includeToolActivity = options.includeToolActivity !== false;
   let expandedSpoilers = 0, assembledBytes = new TextEncoder().encode(parts[0]).length, leftCollapsed = 0;
-  if (options.includeToolActivity !== false) {
+  // Count visible collapsed spoilers up front, then add nested spoilers as their
+  // parent panels mount. Each message and each spoiler is one unit of work.
+  let totalSpoilers = includeToolActivity
+    ? messages.reduce((count, message) => count + AREX.qq(AREX.S.COLLAPSED, message).length, 0)
+    : 0;
+  let lastPercent = 0;
+  const progressPercent = (processedMessages, completedSpoilers, knownSpoilers = totalSpoilers) => {
+    const totalWork = totalMessages + knownSpoilers;
+    if (totalWork <= 0) return 100;
+    const raw = Math.round((processedMessages + completedSpoilers) * 100 / totalWork);
+    const bounded = Math.max(0, Math.min(100, raw));
+    // Nested spoilers are discovered lazily. Keep the displayed estimate
+    // monotonic when discovering them increases the denominator.
+    lastPercent = Math.max(lastPercent, processedMessages < totalMessages ? Math.min(99, bounded) : bounded);
+    return lastPercent;
+  };
+  const countExpandableSpoilers = roots => roots.reduce((count, root) =>
+    count + AREX.qq(AREX.S.EXPANDABLE, root).length, 0);
+
+  if (includeToolActivity) {
     leftCollapsed = AREX.qq(AREX.S.COLLAPSED, log).filter(button => !button.closest(AREX.S.MSG)).length;
   }
   const verifyMessages = () => {
@@ -142,20 +162,33 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
     verifyMessages();
     const roots = messages.slice(start, start + Math.max(1, windowSize));
     const openedButtons = [];
+    const initialExpandableSpoilers = includeToolActivity ? countExpandableSpoilers(roots) : 0;
+    let newlyDiscoveredSpoilers = 0;
+    let spoilersCounted = false;
     let processedInWindow = 0;
     try {
-      if (options.includeToolActivity !== false) {
+      if (includeToolActivity) {
         const expand = await AREX.expandAllSpoilers(log, {
           roots, openedButtons, cooperative: true,
           settleOptions: { quietMs: 100, maxMs: 1500, attributes: false },
-          onProgress: event => onProgress?.({ stage: 'process', phase: 'expand',
-            processedMessages: start, totalMessages, expandedSpoilers: expandedSpoilers + (event.expanded || 0), assembledBytes,
-            percent: Math.round(start * 100 / totalMessages) }),
+          onProgress: event => {
+            newlyDiscoveredSpoilers = Math.max(newlyDiscoveredSpoilers,
+              Math.max(0, countExpandableSpoilers(roots) - initialExpandableSpoilers));
+            const knownSpoilers = totalSpoilers + newlyDiscoveredSpoilers;
+            const completedSpoilers = expandedSpoilers + (event.expanded || 0);
+            onProgress?.({ stage: 'process', phase: 'expand',
+              processedMessages: start, totalMessages, expandedSpoilers: completedSpoilers, totalSpoilers: knownSpoilers, assembledBytes,
+              percent: progressPercent(start, completedSpoilers, knownSpoilers) });
+          },
         });
         // Allows compatible callers that return their own array; the built-in
         // expander normally appends to the shared array as it clicks.
         if (expand.openedButtons && expand.openedButtons !== openedButtons)
           for (const button of expand.openedButtons) if (!openedButtons.includes(button)) openedButtons.push(button);
+        newlyDiscoveredSpoilers = Math.max(newlyDiscoveredSpoilers,
+          Math.max(0, countExpandableSpoilers(roots) - initialExpandableSpoilers));
+        totalSpoilers += newlyDiscoveredSpoilers;
+        spoilersCounted = true;
         expandedSpoilers += expand.expanded || 0;
         leftCollapsed += roots.reduce((n, root) => n + AREX.qq(AREX.S.COLLAPSED, root).length, 0);
       }
@@ -167,16 +200,22 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
         assembledBytes += 2 + new TextEncoder().encode(segment).length;
         processedInWindow = i + 1;
         const processedMessages = start + processedInWindow;
-        onProgress?.({ stage: 'process', processedMessages, totalMessages, expandedSpoilers, assembledBytes,
-          percent: Math.round(processedMessages * 100 / totalMessages) });
+        onProgress?.({ stage: 'process', processedMessages, totalMessages, expandedSpoilers, totalSpoilers, assembledBytes,
+          percent: progressPercent(processedMessages, expandedSpoilers) });
       }
     } finally {
+      if (includeToolActivity && !spoilersCounted) {
+        newlyDiscoveredSpoilers = Math.max(newlyDiscoveredSpoilers,
+          Math.max(0, countExpandableSpoilers(roots) - initialExpandableSpoilers));
+        totalSpoilers += newlyDiscoveredSpoilers;
+      }
       if (openedButtons.length) {
         // Cleanup must finish even when progress reporting or serialization
         // throws, and must not be interrupted by the cancellation signal.
         await AREX.collapseOpenedSpoilers(openedButtons, { roots, cooperative: true, onProgress: event => onCleanup?.({
           stage: 'process', phase: 'cleanup', processedMessages: start + processedInWindow,
-          totalMessages, expandedSpoilers, assembledBytes, percent: Math.round((start + processedInWindow) * 100 / totalMessages),
+          totalMessages, expandedSpoilers, totalSpoilers, assembledBytes,
+          percent: progressPercent(start + processedInWindow, expandedSpoilers),
           closed: event.closed, total: event.total,
         }) });
       }

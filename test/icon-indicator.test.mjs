@@ -50,9 +50,9 @@ test('idle → running with progress → unseen ready → popup clears; themes a
   await content.onMessage.emit({ type: 'AREX_PROGRESS', stage: 'history', phase: 'page', pages: 4, loaded: 80 }); await wait();
   assert.equal(h.last('setBadgeText').text, 'p4');
   assert.match(h.last('setTitle').title, /Loading history: 80 msgs/);
-  await content.onMessage.emit({ type: 'AREX_PROGRESS', stage: 'process', processedMessages: 12, totalMessages: 18, percent: 64 }); await wait();
+  await content.onMessage.emit({ type: 'AREX_PROGRESS', stage: 'process', processedMessages: 12, totalMessages: 18, expandedSpoilers: 7, totalSpoilers: 20, percent: 64 }); await wait();
   assert.equal(h.last('setBadgeText').text, '64%');
-  assert.match(h.last('setTitle').title, /Scanning 64% \(12\/18 msgs\)/);
+  assert.match(h.last('setTitle').title, /Scanning 64% \(12\/18 msgs · 7\/20 spoilers\)/);
   [...h.intervals.values()][0].fn(); await wait();
   assert.equal(h.requests.filter(p => p === 'icons/icon16.png').length, 1);
   await h.changes.emit({ theme: { newValue: 'dark' } }, 'local'); await wait();

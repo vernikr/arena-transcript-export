@@ -219,10 +219,16 @@ function onProgress(message) {
         ? 'Spoilers: pass ' + message.pass + ', rendering… (' + message.expanded + ' opened)'
         : 'Spoilers: pass ' + message.pass + ', opening ' + message.openedThisPass + '/' + message.total + '… (' + message.expanded + ' total)');
       break;
-    case 'process':
+    case 'process': {
       setProgressPercent(message.percent ?? 0);
-      setText('process', 'Scanning: ' + message.processedMessages + '/' + message.totalMessages + ' messages · ' + message.expandedSpoilers + ' spoilers…');
+      const expandedSpoilers = Number.isFinite(message.expandedSpoilers) ? message.expandedSpoilers : 0;
+      const spoilerProgress = Number.isFinite(message.totalSpoilers) && message.totalSpoilers > 0
+        ? expandedSpoilers + '/' + message.totalSpoilers + ' spoilers'
+        : expandedSpoilers + ' spoilers';
+      const percent = Number.isFinite(message.percent) ? ' · ' + Math.round(message.percent) + '%' : '';
+      setText('process', 'Scanning: ' + message.processedMessages + '/' + message.totalMessages + ' messages · ' + spoilerProgress + percent + '…');
       break;
+    }
     case 'serialize':
       setText('serialize', message.phase === 'done'
         ? 'Markdown: ' + AREX.formatByteCount(message.bytes) + ' assembled'
