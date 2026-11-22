@@ -85,14 +85,20 @@ Document header: `# branch title`, source URL, export timestamp, message count. 
   than the initial 150 ms probe cannot be distinguished from a fully loaded history. If legacy paging
   is observed, the exporter falls back to quiet rounds; a visible stuck loader or sentinel produces a
   warning instead of silently claiming completion.
+- The background coordinator rejects corrupted or oversized transfers rather than saving partial
+  exports. The in-memory transfer guard is 64 Mi UTF-16 code units; larger exports are rejected.
+  A disconnected worker is retried up to five times, including after scanning finishes; if retries
+  are exhausted, keep the Arena tab open and retake the snapshot.
 - If Arena eventually introduces real DOM windowing (unloading rendered messages — none today),
   the exporter aborts loudly instead of writing a partial file.
 
 ## Dev
 
-No build step, no runtime dependencies. `npm install` once for jsdom, then `npm test`
+No build step, no runtime dependencies. `npm install` once for the development dependencies, then `npm test`
 (node:test; jsdom unit tests over a saved Arena transcript fixture, snapshot at
 `test/snapshots/fixture-expected.md` — regenerate with `UPDATE_SNAPSHOT=1 npm test`).
+Run `npm run benchmark` for the reproducible jsdom/Node regression benchmark; see
+`docs/performance-results.md` for its scope and a recorded result.
 
 - `docs/architecture.md` — module design, pipeline, DOM→MD mapping, risks.
 - `docs/research/arena-page-analysis.md` — how Arena loads/renders the transcript (evidence).

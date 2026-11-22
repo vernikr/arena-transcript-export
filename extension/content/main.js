@@ -6,6 +6,7 @@ window.AREX = window.AREX || {};
 
 AREX._jobPort = null;
 AREX._jobPortRetries = 0;
+AREX._jobReconnectTimer = null;
 AREX._heartbeatTimer = null;
 AREX._running = false;
 AREX._abortController = null;
@@ -34,7 +35,8 @@ AREX.throwIfAborted = function () {
 };
 
 function postJob(message) {
-  try { AREX._jobPort?.postMessage(message); return true; } catch { return false; }
+  if (!AREX._jobPort) return false;
+  try { AREX._jobPort.postMessage(message); return true; } catch { AREX._jobPort = null; return false; }
 }
 
 function ensureJobPort() {
@@ -51,6 +53,8 @@ function ensureJobPort() {
     if (msg?.type === 'AREX_RESULT_ACK') {
       // Background durably stored the snapshot and the tab can release its copy.
       AREX._job.result = null;
+      if (AREX._jobReconnectTimer) clearTimeout(AREX._jobReconnectTimer);
+      AREX._jobReconnectTimer = null;
       AREX._job.status = 'saved';
       AREX._job.updatedAt = Date.now();
       return;
@@ -58,27 +62,51 @@ function ensureJobPort() {
   });
   port.onDisconnect.addListener(() => {
     if (AREX._jobPort === port) AREX._jobPort = null;
-    // Service worker restart or crash: keep the export alive and re-attach.
-    if (AREX._running && AREX._jobPortRetries < 5) {
-      AREX._jobPortRetries += 1;
-      setTimeout(() => {
-        if (!AREX._running) return;
-        const reconnected = ensureJobPort();
-        if (reconnected) {
-          postJob({
-            type: 'AREX_JOB_START',
-            chatUuid: AREX.chatUuid?.() || null,
-            sourceUrl: location.href,
-            startedAt: AREX._job.startedAt || Date.now(),
-            progress: AREX._job.progress,
-            options: {},
-            resumed: true,
-          });
-        }
-      }, 1000);
-    }
+    // A completed result is retained until ACK, so reconnect and resend even
+    // after the scan itself has finished if the worker restarted mid-transfer.
+    scheduleJobReconnect();
   });
   return port;
+}
+
+function needsJobReconnect() {
+  return AREX._running || Boolean(AREX._job.result) || (AREX._job.status === 'error' && !AREX._job.errorDelivered);
+}
+
+function scheduleJobReconnect() {
+  if (AREX._jobReconnectTimer || AREX._jobPortRetries >= 5 || !needsJobReconnect()) return;
+  AREX._jobPortRetries += 1;
+  AREX._jobReconnectTimer = setTimeout(() => {
+    AREX._jobReconnectTimer = null;
+    if (!needsJobReconnect()) return;
+    const reconnected = ensureJobPort();
+    if (!reconnected) { scheduleJobReconnect(); return; }
+    const started = postJob({
+      type: 'AREX_JOB_START', chatUuid: AREX.chatUuid?.() || null, sourceUrl: location.href,
+      startedAt: AREX._job.startedAt || Date.now(), progress: AREX._job.progress, options: {}, resumed: true,
+    });
+    if (!started) { scheduleJobReconnect(); return; }
+    if (AREX._job.result && !sendPendingResult()) scheduleJobReconnect();
+    else if (AREX._job.status === 'error' && !AREX._job.errorDelivered) {
+      AREX._job.errorDelivered = postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error });
+      if (!AREX._job.errorDelivered) scheduleJobReconnect();
+    }
+  }, 1000);
+}
+
+// Retransmission is idempotent: a new AREX_JOB_START resets the background's
+// partial assembly before the complete ordered chunk stream is sent again.
+function sendPendingResult() {
+  const result = AREX._job.result;
+  if (!result) return true;
+  const markdown = result.markdown;
+  for (let offset = 0, seq = 0; offset < markdown.length || seq === 0; offset += JOB_CHUNK_CHARS, seq += 1) {
+    const data = markdown.slice(offset, offset + JOB_CHUNK_CHARS);
+    if (!postJob({ type: 'AREX_RESULT_CHUNK', seq, data })) return false;
+    if (!data && seq === 0) break;
+  }
+  return postJob({ type: 'AREX_RESULT_END', ok: true, filename: result.filename, stats: result.stats,
+    warnings: result.warnings, bytes: AREX._job.resultBytes, createdAt: AREX._job.resultCreatedAt });
 }
 
 function startHeartbeat() {
@@ -163,6 +191,8 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
 AREX.runExport = async function (options = {}) {
   if (AREX._running) throw new Error('Export is already running in this tab.');
   AREX._running = true;
+  if (AREX._jobReconnectTimer) clearTimeout(AREX._jobReconnectTimer);
+  AREX._jobReconnectTimer = null;
   AREX._jobPortRetries = 0;
   AREX._abortController = new AbortController();
   AREX._job = {
@@ -174,7 +204,7 @@ AREX.runExport = async function (options = {}) {
     updatedAt: Date.now(),
   };
   ensureJobPort();
-  postJob({
+  const announced = postJob({
     type: 'AREX_JOB_START',
     chatUuid: AREX.chatUuid?.() || null,
     sourceUrl: location.href,
@@ -182,6 +212,7 @@ AREX.runExport = async function (options = {}) {
     progress: [],
     options,
   });
+  if (!announced) scheduleJobReconnect();
   startHeartbeat();
 
   const progress = p => {
@@ -228,30 +259,17 @@ AREX.runExport = async function (options = {}) {
     AREX._job.result = result;
     AREX._job.updatedAt = Date.now();
 
-    for (let offset = 0, seq = 0; offset < markdown.length || seq === 0; offset += JOB_CHUNK_CHARS, seq += 1) {
-      const data = markdown.slice(offset, offset + JOB_CHUNK_CHARS);
-      postJob({ type: 'AREX_RESULT_CHUNK', seq, data });
-      if (!data && seq === 0) break;
-    }
-    // The background stores the snapshot to IndexedDB and then posts AREX_RESULT_ACK;
-    // the job port handler releases AREX._job.result when it arrives. If the
-    // acknowledgement never comes, the in-tab copy is kept for popup recovery.
-    postJob({
-      type: 'AREX_RESULT_END',
-      ok: true,
-      filename: result.filename,
-      stats: result.stats,
-      warnings: result.warnings,
-      bytes,
-      createdAt: Date.now(),
-    });
+    AREX._job.resultBytes = bytes;
+    AREX._job.resultCreatedAt = Date.now();
+    if (!sendPendingResult()) scheduleJobReconnect();
     return result;
   } catch (error) {
     const cancelled = isAbortError(error);
     AREX._job.status = 'error';
     AREX._job.error = cancelled ? 'Export cancelled.' : String(error?.message || error);
     AREX._job.updatedAt = Date.now();
-    postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error });
+    AREX._job.errorDelivered = postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error });
+    if (!AREX._job.errorDelivered) scheduleJobReconnect();
     throw error;
   } finally {
     stopHeartbeat();

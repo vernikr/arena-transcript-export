@@ -9,7 +9,7 @@ Research evidence: `docs/research/arena-page-analysis.md`.
 ## Shape
 
 Plain MV3 extension, no build step, zero runtime deps (custom ~200-line HTML→MD converter).
-Dev-only dep: jsdom (unit tests against a saved transcript fixture).
+Dev-only deps: jsdom (saved transcript fixture) and fake-indexeddb (transaction tests).
 
 ```
 extension/
@@ -106,7 +106,12 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   only the UI port; it does not cancel the task. A reopened popup requests status, replays retained
   progress, and loads the saved snapshot if the scan has completed.
 - The content script keeps the raw result until the background worker confirms a successful write to
-  extension IndexedDB. If persistence fails, the result remains available for a later popup session.
+  extension IndexedDB. If persistence fails, the result remains available in worker memory for popup
+  recovery while that worker stays alive. If its port disconnects, the content script retries up to
+  five times and resends any unacknowledged result; exhausted retries require a fresh snapshot.
+- Result chunks must have unique consecutive sequence numbers and match the declared UTF-8 byte
+  length. Invalid, incomplete or oversized transfers fail without an ACK or partial IndexedDB write.
+  The size guard limits the assembled transfer to 64 Mi UTF-16 code units, not UTF-8 bytes.
 
 ## Delivery & UX details
 
@@ -154,4 +159,6 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
 fixture (546 KB, 9 messages) asserting message order/roles, fences, exclusion of sidebar/panel
 artifacts; loader/expander loops against synthetic DOMs that emulate Arena's mount-on-click and
 prepend-on-scroll behavior with fake timers; popup-port reconnect tests cover scan continuation,
-progress replay, result delivery and acknowledgement.
+progress replay, result delivery and acknowledgement; fake IndexedDB verifies shared storage and
+transaction behavior, and `npm run benchmark` records scoped fixture/token/compression measurements.
+See `docs/performance-results.md` for methodology, limitations and measured results.

@@ -168,3 +168,65 @@ test('AREX_EXPORT_CANCEL aborts the run, collapses opened spoilers and reports a
 
   dom.window.close();
 });
+
+test('reconnects and resends an unacknowledged result after the scan has finished', async () => {
+  const dom = makeDom();
+  const chromeMock = installChromeMock(dom.window);
+  const AREX = loadContentScripts(dom);
+  stubFastExport(AREX, dom.window.document.querySelector('[role="log"]'));
+  await AREX.runExport();
+  assert.equal(AREX._running, false);
+  assert.ok(AREX._job.result, 'unacknowledged result must remain available');
+  const previous = chromeMock.jobPort;
+  previous.disconnect();
+  await waitUntil(() => chromeMock.jobPort !== previous, 2500);
+  const resumed = chromeMock.jobPort;
+  await waitUntil(() => resumed.sent.some(m => m.type === 'AREX_RESULT_END'), 2500);
+  assert.ok(resumed.sent.some(m => m.type === 'AREX_JOB_START' && m.resumed));
+  assert.equal(resumed.sent.filter(m => m.type === 'AREX_RESULT_CHUNK').map(m => m.data).join(''), '# Captured transcript\n\nCaptured message\n');
+  assert.equal(resumed.sent.find(m => m.type === 'AREX_RESULT_END').bytes, new TextEncoder().encode('# Captured transcript\n\nCaptured message\n').length);
+  await resumed.emit({ type: 'AREX_RESULT_ACK' });
+  assert.equal(AREX._job.result, null);
+  dom.window.close();
+});
+
+test('initial connection failure retries and transfers the finished result', async () => {
+  const dom = makeDom();
+  const chromeMock = installChromeMock(dom.window);
+  const original = dom.window.chrome.runtime.connect;
+  let attempts = 0;
+  dom.window.chrome.runtime.connect = args => {
+    if (++attempts === 1) throw new Error('worker unavailable');
+    return original(args);
+  };
+  const AREX = loadContentScripts(dom);
+  stubFastExport(AREX, dom.window.document.querySelector('[role="log"]'));
+  await AREX.runExport();
+  assert.ok(AREX._job.result);
+  await waitUntil(() => chromeMock.jobPort?.sent.some(m => m.type === 'AREX_RESULT_END'), 2500);
+  assert.ok(attempts >= 2);
+  assert.ok(chromeMock.jobPort.sent.some(m => m.type === 'AREX_JOB_START' && m.resumed));
+  await chromeMock.jobPort.emit({ type: 'AREX_RESULT_ACK' });
+  assert.equal(AREX._job.result, null);
+  dom.window.close();
+});
+
+test('an error produced while disconnected is sent after reconnection', async () => {
+  const dom = makeDom();
+  const chromeMock = installChromeMock(dom.window);
+  const original = dom.window.chrome.runtime.connect;
+  let attempts = 0;
+  dom.window.chrome.runtime.connect = args => {
+    if (++attempts === 1) throw new Error('worker unavailable');
+    return original(args);
+  };
+  const AREX = loadContentScripts(dom);
+  const log = dom.window.document.querySelector('[role="log"]');
+  stubFastExport(AREX, log, { onLoadFullHistory: async () => { throw new Error('History unavailable'); } });
+  await assert.rejects(AREX.runExport(), /History unavailable/);
+  await waitUntil(() => chromeMock.jobPort?.sent.some(m => m.type === 'AREX_RESULT_END'), 2500);
+  const end = chromeMock.jobPort.sent.find(m => m.type === 'AREX_RESULT_END');
+  assert.equal(end.ok, false); assert.match(end.error, /History unavailable/);
+  assert.equal(AREX._job.errorDelivered, true);
+  dom.window.close();
+});

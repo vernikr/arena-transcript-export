@@ -25,7 +25,7 @@ const CONTENT_FILES = [
 const CONTENT_FEATURE_VERSION = '0.3.0';
 const MAX_TRACKED_JOBS = 30;
 const PROGRESS_CAP = 500;
-const CHUNK_LIMIT_BYTES = 64 * 1024 * 1024; // guard against corrupt/oversized transfers
+const CHUNK_LIMIT_CODE_UNITS = 64 * 1024 * 1024; // bound assembled UTF-16 string size
 const STALE_RUNNING_MS = 45000; // > 2 missed 20 s heartbeats
 const SESSION_KEY = 'arexJobs';
 
@@ -182,12 +182,24 @@ async function finalizeResult(job, endMessage) {
   let markdown = '';
   if (pending) {
     const ordered = [...pending.chunks.entries()].sort((a, b) => a[0] - b[0]);
+    if (!ordered.length || ordered.some(([seq], index) => seq !== index)) {
+      job.pendingResult = null;
+      setJobStatus(job, 'error', { error: 'Export transfer was incomplete; retry the export.' });
+      return;
+    }
     markdown = ordered.map(([, data]) => data).join('');
   } else if (typeof endMessage?.markdown === 'string') {
     markdown = endMessage.markdown; // single-message transfer (small exports)
+  } else {
+    setJobStatus(job, 'error', { error: 'Export transfer contained no result; retry the export.' });
+    return;
   }
   job.pendingResult = null;
-  const bytes = endMessage?.bytes ?? new TextEncoder().encode(markdown).length;
+  const bytes = new TextEncoder().encode(markdown).length;
+  if (endMessage?.bytes != null && (!Number.isSafeInteger(endMessage.bytes) || endMessage.bytes !== bytes)) {
+    setJobStatus(job, 'error', { error: 'Export transfer size did not match; retry the export.' });
+    return;
+  }
 
   const snapshot = {
     markdown,
@@ -201,10 +213,12 @@ async function finalizeResult(job, endMessage) {
     bytes,
   };
 
+  // Preserve metadata even if persistence fails and the popup must recover the
+  // in-memory result; do not ACK until the IndexedDB transaction commits.
+  job.resultMeta = { filename: snapshot.filename, bytes, stats: snapshot.stats, warnings: snapshot.warnings, createdAt: snapshot.createdAt };
   if (RESULT_STORE) {
     try {
       await RESULT_STORE.save(snapshot);
-      job.resultMeta = { filename: snapshot.filename, bytes, stats: snapshot.stats, warnings: snapshot.warnings, createdAt: snapshot.createdAt };
       setJobStatus(job, 'done', { error: null });
       postSafe(jobPortsByTab.get(job.tabId), { type: 'AREX_RESULT_ACK' });
       return;
@@ -233,6 +247,7 @@ function handleJobMessage(job, msg, port) {
       job.startedAt = msg.startedAt || now();
       job.resultMeta = null;
       job.pendingResult = null;
+      job.finalizing = false;
       if (Array.isArray(msg.progress) && msg.progress.length) {
         // Re-sync after a service-worker restart: adopt the tab's own log.
         job.progress = msg.progress.slice(-PROGRESS_CAP);
@@ -251,12 +266,21 @@ function handleJobMessage(job, msg, port) {
       persistJobs();
       return;
     case 'AREX_RESULT_CHUNK': {
-      if (typeof msg.seq !== 'number' || typeof msg.data !== 'string') return;
+      if (job.status !== 'running' || job.finalizing) return;
+      if (!Number.isSafeInteger(msg.seq) || msg.seq < 0 || typeof msg.data !== 'string') {
+        job.pendingResult = null;
+        setJobStatus(job, 'error', { error: 'Invalid export chunk; retry the export.' });
+        return;
+      }
       const pending = ensurePendingResult(job);
+      if (pending.chunks.has(msg.seq)) {
+        job.pendingResult = null;
+        setJobStatus(job, 'error', { error: 'Duplicate export chunk; retry the export.' });
+        return;
+      }
       pending.bytes += msg.data.length;
-      if (pending.bytes > CHUNK_LIMIT_BYTES) {
-        pending.chunks.clear();
-        pending.bytes = 0;
+      if (pending.bytes > CHUNK_LIMIT_CODE_UNITS) {
+        job.pendingResult = null;
         setJobStatus(job, 'error', { error: 'Export is too large to transfer to the background worker.' });
         return;
       }
@@ -264,12 +288,14 @@ function handleJobMessage(job, msg, port) {
       return;
     }
     case 'AREX_RESULT_END':
+      if (job.status !== 'running' || job.finalizing) return;
       if (msg.ok === false) {
         job.pendingResult = null;
         setJobStatus(job, 'error', { error: msg.error || 'Export failed.' });
         return;
       }
-      void finalizeResult(job, msg);
+      job.finalizing = true;
+      void finalizeResult(job, msg).finally(() => { job.finalizing = false; });
       return;
     default:
       return;
@@ -286,11 +312,18 @@ chrome.runtime.onConnect.addListener(port => {
     capJobs();
     port.onMessage.addListener(msg => handleJobMessage(job, msg, port));
     port.onDisconnect.addListener(() => {
-      if (jobPortsByTab.get(tabId) === port) jobPortsByTab.delete(tabId);
-      if (jobsByTab.get(tabId)?.status === 'running' && now() - job.updatedAt > 5000) {
-        // Content vanished mid-run (tab closed / crashed) without a tabs event.
-        setJobStatus(job, 'error', { error: 'Lost contact with the Arena tab before the export finished.' });
-      }
+      // An obsolete port must not fail a newer connection for the same tab.
+      if (jobPortsByTab.get(tabId) !== port) return;
+      jobPortsByTab.delete(tabId);
+      if (jobsByTab.get(tabId) !== job || job.status !== 'running' || job.finalizing) return;
+      // Allow the content script's reconnect attempts, but do not leave a
+      // crashed tab spinning indefinitely when no tabs event is delivered.
+      const timer = setTimeout(() => {
+        if (jobsByTab.get(tabId) === job && job.status === 'running' && !job.finalizing &&
+            !jobPortsByTab.has(tabId) && now() - job.updatedAt >= 5000)
+          setJobStatus(job, 'error', { error: 'Lost contact with the Arena tab before the export finished.' });
+      }, 6000);
+      timer?.unref?.(); // Node test harness; browser timer IDs are numeric.
     });
     return;
   }
@@ -304,9 +337,14 @@ chrome.runtime.onConnect.addListener(port => {
       persistJobs({ immediate: true });
       updateIndicator();
     });
-    let subscribedTabId = null;
+    let subscribedTabId = null, disconnected = false;
     port.onMessage.addListener(async msg => {
       if (!msg || typeof msg !== 'object') return;
+      // The service worker may have been woken by this popup before its
+      // asynchronous session restore has finished. Never reply with a false
+      // empty status or start a competing export during that restore.
+      await restored;
+      if (disconnected) return;
       const tabId = typeof msg.tabId === 'number' ? msg.tabId : subscribedTabId;
       switch (msg.type) {
         case 'AREX_HELLO': {
@@ -361,6 +399,7 @@ chrome.runtime.onConnect.addListener(port => {
       }
     });
     port.onDisconnect.addListener(() => {
+      disconnected = true;
       if (subscribedTabId !== null) {
         const set = popupPortsByTab.get(subscribedTabId);
         set?.delete(port);

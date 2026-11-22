@@ -57,7 +57,7 @@ test('idle → running with progress → unseen ready → popup clears; themes a
   assert.equal(h.requests.filter(p => p === 'icons/icon16.png').length, 1);
   await h.changes.emit({ theme: { newValue: 'dark' } }, 'local'); await wait();
   assert.ok(h.requests.includes('icons/icon16-dark.png'));
-  await content.onMessage.emit({ type: 'AREX_RESULT_END', ok: true, markdown: 'hello', bytes: 1420000 }); await wait();
+  await content.onMessage.emit({ type: 'AREX_RESULT_END', ok: true, markdown: 'a'.repeat(1420000), bytes: 1420000 }); await wait();
   assert.equal(h.intervals.size, 0);
   assert.equal(h.last('setBadgeText').text, '✓');
   assert.equal(h.last('setBadgeBackgroundColor').color, '#188038');
