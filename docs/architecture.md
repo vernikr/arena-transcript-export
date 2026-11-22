@@ -48,8 +48,9 @@ EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoile
    ~2–3 s instead of waiting out long timeouts).
 2. **Spoiler gate** (`expand.js`). Collapsed spoilers don't exist in the DOM (unmounted, not
    hidden), and groups mount nested collapsed children when opened → iterative passes:
-   click every visible `button[aria-expanded="false"]` inside `div[role="log"]`, wait for the DOM
-   to settle (MutationObserver quiet ≥250 ms, cap 3 s), repeat. Stop on an empty pass; bail with a
+   click visible `button[aria-expanded="false"]` inside `div[role="log"]` in batches of ten,
+   yielding between batches so the page can render and report progress; wait for the DOM to settle
+   (MutationObserver quiet ≥250 ms, cap 3 s), then repeat. Stop on an empty pass; bail with a
    warning if a pass makes no progress (stuck/disabled buttons). Message count is re-checked after
    each pass — a change signals unexpected remounting (future windowing) and aborts export loudly.
 3. **Serialization** (`serialize.js` + `markdown.js`). Order-preserving walk over

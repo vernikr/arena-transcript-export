@@ -92,7 +92,7 @@ function onProgress(p) {
     case 'expand':
       setText('expand', p.phase === 'settle'
         ? `Spoilers: pass ${p.pass}, rendering… (${p.expanded} opened)`
-        : `Spoilers: pass ${p.pass}, opening ${p.clicking}… (${p.expanded} opened)`);
+        : `Spoilers: pass ${p.pass}, opening ${p.openedThisPass}/${p.total}… (${p.expanded} total)`);
       break;
     case 'serialize':
       setText('serialize', p.phase === 'done' ? `Markdown: ${kb(p.bytes)} assembled` : 'Markdown: converting…');

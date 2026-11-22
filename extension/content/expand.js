@@ -6,7 +6,7 @@ window.AREX = window.AREX || {};
 (function () {
   const S = AREX.S;
 
-  AREX.expandAllSpoilers = async function (log, { onProgress, maxPasses = 60 } = {}) {
+  AREX.expandAllSpoilers = async function (log, { onProgress, maxPasses = 60, batchSize = 10 } = {}) {
     let expanded = 0, passes = 0, stuck = [];
     let msgCount = AREX.messages(log).length;
 
@@ -18,9 +18,18 @@ window.AREX = window.AREX || {};
       });
       if (!collapsed.length) return { expanded, stuck };
 
-      collapsed.forEach(b => { try { b.click(); } catch { /* detached mid-pass */ } });
-      expanded += collapsed.length;
-      onProgress?.({ stage: 'expand', phase: 'click', pass: passes + 1, clicking: collapsed.length, expanded });
+      let clicked = 0, openedThisPass = 0;
+      for (let i = 0; i < collapsed.length; i++) {
+        const button = collapsed[i];
+        if (button.isConnected && button.getAttribute('aria-expanded') === 'false') {
+          try { button.click(); clicked++; openedThisPass++; expanded++; } catch { /* detached mid-pass */ }
+        }
+        if ((i + 1) % batchSize === 0 || i === collapsed.length - 1) {
+          onProgress?.({ stage: 'expand', phase: 'click', pass: passes + 1, clicking: clicked, openedThisPass, total: collapsed.length, expanded });
+          await AREX.sleep(0);
+          clicked = 0;
+        }
+      }
       await AREX.settle(log);
       onProgress?.({ stage: 'expand', phase: 'settle', pass: passes + 1, expanded });
 

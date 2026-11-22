@@ -122,6 +122,28 @@ test('expander clicks nested spoilers until none remain', async () => {
   assert.equal(log.querySelectorAll('[style*="overflow: clip"]').length, 3);
 });
 
+test('expander opens large batches incrementally and yields between them', async () => {
+  const buttons = Array.from({ length: 25 }, (_, i) =>
+    `<button aria-expanded="false">item ${i + 1}</button>`).join('');
+  const { document, AREX } = makeEnv({ html: `<div role="log"><div data-agent-transcript-message data-chat-message-id="batch">${buttons}</div></div>` });
+  const log = document.querySelector('[role="log"]');
+  log.querySelectorAll('button').forEach(button => button.addEventListener('click', () => button.setAttribute('aria-expanded', 'true')));
+  const progress = [];
+  let yields = 0;
+  const sleep = AREX.sleep;
+  AREX.sleep = async ms => { if (ms === 0) yields++; return sleep(ms); };
+
+  const result = await AREX.expandAllSpoilers(log, { batchSize: 10, onProgress: p => progress.push(p) });
+  const batches = progress.filter(p => p.phase === 'click');
+
+  assert.equal(result.expanded, 25);
+  assert.equal(result.stuck.length, 0);
+  assert.equal(yields, 3);
+  assert.equal(batches.map(p => p.openedThisPass).join(','), '10,20,25');
+  assert.equal(batches.map(p => p.expanded).join(','), '10,20,25');
+  assert.equal(batches.map(p => p.total).join(','), '25,25,25');
+});
+
 test('expander reports stuck (non-expandable) buttons instead of looping', async () => {
   const { document, AREX } = makeEnv({
     html: `<div role="log"><div data-agent-transcript-message data-chat-message-id="x1">
