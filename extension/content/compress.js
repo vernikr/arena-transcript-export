@@ -8,9 +8,13 @@ window.AREX = window.AREX || {};
   function utf8Bytes(value) { return new TextEncoder().encode(value).length; }
   function formatBytes(bytes) {
     const safe = Math.max(0, Math.round(bytes));
-    if (safe < 1024) return safe + " B";
-    if (safe < 1024 * 1024) return (safe / 1024).toFixed(1) + " KB";
-    return (safe / (1024 * 1024)).toFixed(2) + " MB";
+    if (safe < 1000) return safe + " B";
+    if (safe < 1000000) return (safe / 1000).toFixed(1) + " KB";
+    return (safe / 1000000).toFixed(2) + " MB";
+  }
+
+  function formatByteCount(bytes) {
+    return Math.max(0, Math.round(bytes)).toLocaleString("en-US") + " B";
   }
 
   // Lightweight multilingual estimate for preview; this is not an exact tokenizer.
@@ -204,10 +208,13 @@ window.AREX = window.AREX || {};
     const parsed = parseFencedBlocks(markdown);
     const groups = new Map();
     for (const block of parsed.blocks) {
-      if (block.label !== "stdout" && block.label !== "stderr" && !block.fileName) continue;
-      const readHeading = /^(?:used\s+)?(?:read|open|cat)\s+(.+?)(?:\s+\d+(?:\.\d+)?\s*(?:ms|s))?$/i.exec(block.activity);
-      const key = (block.fileName || (readHeading ? readHeading[1] : "")).trim().replace(/[\\/]+/g, "/").toLowerCase();
-      if (!key) continue;
+      const readHeading = /^(?:used\s+)?(?:read|open|cat|view)\s+(.+?)(?:\s+[-—·]?\s*\d+(?:\.\d+)?\s*(?:ms|s))?$/i.exec(block.activity);
+      const readBodyPath = /^\s*(?:<path>|path:\s*|file:\s*)([^\n<]+)(?:<\/path>)?/i.exec(block.body);
+      const commandPath = /(?:^|\s)(?:cat|head|tail|less|sed)\s+(?:-[^\s]+\s+)*["']?([^\s"'<>|;&]+)/i.exec(block.body);
+      const candidate = block.fileName || (readHeading ? readHeading[1] : "") ||
+        (readBodyPath ? readBodyPath[1] : "") || (commandPath ? commandPath[1] : "");
+      const key = candidate.trim().replace(/^["']+|["']+$/g, "").replace(/[\\/]+/g, "/").toLowerCase();
+      if (!key || (block.label === "command" && !readHeading && !block.fileName)) continue;
       const list = groups.get(key) || [];
       list.push(block);
       groups.set(key, list);
@@ -291,4 +298,5 @@ window.AREX = window.AREX || {};
     return { bytes: utf8Bytes(markdown), estimatedTokens: estimateTokens(markdown) };
   };
   AREX.formatBytes = formatBytes;
+  AREX.formatByteCount = formatByteCount;
 })();

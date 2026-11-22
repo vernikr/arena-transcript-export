@@ -57,6 +57,7 @@
   #modeDescription { margin: 6px 2px 0; color: var(--secondary); font-size: 10.5px; line-height: 15px; }
   #compression.disabled #modes, #compression.disabled #modeDescription { display: none; }
 
+  .actions { display: grid; gap: 5px; }
   #export {
     width: 100%; margin-top: 10px; min-height: 36px; border: 0; border-radius: 8px;
     background: var(--accent); color: var(--on-accent);
@@ -67,7 +68,13 @@
   #export:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   #export:active:not(:disabled) { background: var(--accent-active); }
   #export:disabled { background: var(--disabled-bg); color: var(--disabled-fg); cursor: default; }
-  #export:focus-visible, label.opt:focus-within, .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #resnapshot {
+    min-height: 30px; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--fg); background: transparent; font: inherit; font-size: 11px; cursor: pointer;
+  }
+  #resnapshot:hover:not(:disabled) { background: var(--track); }
+  #resnapshot:disabled { color: var(--disabled-fg); cursor: default; }
+  #export:focus-visible, #resnapshot:focus-visible, label.opt:focus-within, .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   #sizePreview {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -77,6 +84,7 @@
   }
   #sizePreview[hidden] { display: none; }
   #sizeLabel { font-size: 11px; color: var(--secondary); }
+  #sizeExactValue { color: var(--secondary); font-size: 10px; font-variant-numeric: tabular-nums; }
   #sizeValue { font-size: 15px; line-height: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
   #tokensValue { color: var(--secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
   #savedValue { color: var(--ok); font-size: 11px; font-weight: 500; text-align: right; }
@@ -132,10 +140,14 @@
     <p id="modeDescription">Exact duplicate outputs are kept once and replaced by links to the original block.</p>
   </section>
 
-  <button id="export">Prepare preview</button>
+  <div class="actions">
+    <button id="export">Prepare preview</button>
+    <button id="resnapshot" type="button" hidden>Retake snapshot</button>
+  </div>
   <section id="sizePreview" hidden aria-live="polite">
     <div>
       <div id="sizeLabel">Final Markdown size</div>
+      <div id="sizeExactValue"></div>
       <div id="tokensValue"></div>
     </div>
     <div>
@@ -145,6 +157,7 @@
   </section>
   <section id="progress" hidden><ul id="log"></ul><div id="status"></div></section>
   <script src="../content/compress.js"></script>
+  <script src="result-store.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

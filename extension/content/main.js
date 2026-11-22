@@ -15,7 +15,7 @@ AREX.runExport = async function (options = {}) {
     const log = AREX.logEl();
 
     const hist = await AREX.loadFullHistory(log, { onProgress: progress });
-    let expand = { expanded: 0, stuck: [] };
+    let expand = { expanded: 0, stuck: [], openedButtons: [] };
     if (options.includeToolActivity !== false)
       expand = await AREX.expandAllSpoilers(log, { onProgress: progress });
     await AREX.settle(log, { quietMs: 400, maxMs: 6000 });
@@ -25,6 +25,11 @@ AREX.runExport = async function (options = {}) {
     const bytes = AREX.measureMarkdown(markdown).bytes;
     progress({ stage: 'serialize', phase: 'done', bytes });
     const leftCollapsed = options.includeToolActivity !== false ? AREX.qq(AREX.S.COLLAPSED, log).length : 0;
+
+    // The Markdown snapshot is complete. Close only spoilers this export opened
+    // so Arena can release their large nested DOM trees and return to its prior state.
+    if (expand.openedButtons?.length)
+      await AREX.collapseOpenedSpoilers(expand.openedButtons, { onProgress: progress });
 
     const warnings = [];
     if (!hist.stable) warnings.push('History loading stopped before the oldest message was confirmed — the branch may be truncated.');
@@ -54,7 +59,7 @@ AREX.directDownload = function (markdown, filename) {
 
 if (typeof chrome !== 'undefined' && chrome.runtime?.id) {
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg?.type === 'AREX_PING') sendResponse({ ok: true, compressionPreview: true });
+    if (msg?.type === 'AREX_PING') sendResponse({ ok: true, compressionPreview: true, featureVersion: '0.2.9' });
   });
   chrome.runtime.onConnect.addListener(port => {
     if (port.name !== 'AREX') return;

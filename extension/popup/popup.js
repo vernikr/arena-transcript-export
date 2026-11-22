@@ -8,6 +8,8 @@
 const $ = s => document.querySelector(s);
 const status = $('#status');
 const btn = $('#export');
+const resnapshotBtn = $('#resnapshot');
+const sizeExactValue = $('#sizeExactValue');
 const optActivity = $('#includeToolActivity');
 const optTimestamps = $('#timestamps');
 const optCompress = $('#compressHistory');
@@ -25,7 +27,7 @@ const CONTENT_FILES = [
   'content/selectors.js', 'content/util.js', 'content/markdown.js', 'content/serialize.js',
   'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/main.js',
 ];
-const STAGE_ORDER = ['history', 'expand', 'serialize'];
+const STAGE_ORDER = ['history', 'expand', 'serialize', 'cleanup'];
 const MODE_DESCRIPTIONS = {
   lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block.',
   smart: 'Lossless + removes terminal noise, folds long passing-test runs and trims very long clean logs. Error output is preserved.',
@@ -36,9 +38,10 @@ const kb = n => AREX.formatBytes(n);
 
 let port = null;
 let prepared = null;
-let downloaded = false;
 let preparing = false;
 let activeMode = 'lossless';
+let resolveOptionsReady;
+const optionsReady = new Promise(resolve => { resolveOptionsReady = resolve; });
 
 chrome.storage.sync.get({
   includeToolActivity: true,
@@ -52,6 +55,7 @@ chrome.storage.sync.get({
   activeMode = ['lossless', 'smart', 'stubs'].includes(options.compressionMode)
     ? options.compressionMode : 'lossless';
   updateCompressionControls();
+  resolveOptionsReady();
 });
 
 function persistOptions() {
@@ -87,7 +91,6 @@ function activeArenaTab() {
       progress.hidden = false;
       logEl.replaceChildren();
       say('Open an Arena.ai agent conversation to export it.', 'error');
-      btn.disabled = true;
       return null;
     }
     return tab;
@@ -103,7 +106,7 @@ async function ensurePort(tabId) {
     catch { fin(null); }
     setTimeout(() => fin(null), 800);
   });
-  if (readiness?.ok && !readiness.compressionPreview) {
+  if (readiness?.ok && readiness.featureVersion !== '0.2.9') {
     throw new Error('Reload this Arena tab once to activate the updated export extension.');
   }
   if (!readiness?.ok) await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
@@ -164,8 +167,11 @@ function onProgress(message) {
       break;
     case 'serialize':
       setText('serialize', message.phase === 'done'
-        ? 'Markdown: ' + kb(message.bytes) + ' assembled'
+        ? 'Markdown: ' + AREX.formatByteCount(message.bytes) + ' assembled'
         : 'Markdown: converting…');
+      break;
+    case 'cleanup':
+      setText('cleanup', 'Cleanup: closing ' + message.closed + '/' + message.total + ' expanded spoilers…');
       break;
   }
 }
@@ -177,8 +183,11 @@ function compressionMode() {
 function renderSizePreview() {
   if (!prepared) return;
   const preview = AREX.compressMarkdown(prepared.markdown, { mode: compressionMode() });
+  const outputBlob = new Blob([preview.markdown], { type: 'text/markdown;charset=utf-8' });
+  preview.bytes = outputBlob.size;
   sizePreview.hidden = false;
   sizeValue.textContent = kb(preview.bytes);
+  sizeExactValue.textContent = AREX.formatByteCount(preview.bytes);
   tokensValue.textContent = '~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens';
   if (preview.savedBytes > 0) {
     const percent = Math.max(1, Math.round(preview.savedRatio * 100));
@@ -189,14 +198,14 @@ function renderSizePreview() {
   prepared.preview = preview;
 }
 
-function onResult(message) {
+async function onResult(message) {
   preparing = false;
   btn.disabled = false;
+  resnapshotBtn.disabled = false;
   if (!message.ok) {
-    prepared = null;
-    downloaded = false;
-    btn.textContent = 'Prepare preview';
-    setPreparationControlsDisabled(false);
+    btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
+    setPreparationControlsDisabled(!!prepared);
+    if (prepared) renderSizePreview();
     say(message.error, 'error');
     for (const stage in lines) {
       if (!lines[stage].li.classList.contains('done')) {
@@ -208,35 +217,58 @@ function onResult(message) {
     return;
   }
 
-  prepared = message;
-  downloaded = false;
+  prepared = {
+    markdown: message.markdown,
+    filename: message.filename,
+    stats: message.stats,
+    warnings: message.warnings || [],
+    createdAt: Date.now(),
+  };
+  let storageWarning = '';
+  try {
+    await AREX_RESULT_STORE.save(prepared);
+  } catch (error) {
+    storageWarning = '\n⚠ Could not save this preview for the next popup opening: ' +
+      String(error?.message || error);
+  }
+
   for (const stage of STAGE_ORDER) if (lines[stage]) setIcon(lines[stage], '✓', 'tick');
   setPreparationControlsDisabled(true);
+  resnapshotBtn.hidden = false;
+  resnapshotBtn.disabled = false;
   btn.textContent = 'Download Markdown';
   renderSizePreview();
   const warnings = message.warnings?.length ? '\n⚠ ' + message.warnings.join('\n⚠ ') : '';
   say(
     'Preview ready · ' + message.stats.messages + ' messages · ' + message.stats.expandedSpoilers +
-      ' spoilers\nSwitch compression modes to update the size, then download.' + warnings,
-    message.warnings?.length ? 'warn' : '',
+      ' spoilers\nSwitch compression modes to update the size, then download.' + warnings + storageWarning,
+    message.warnings?.length || storageWarning ? 'warn' : '',
   );
 }
 
 async function preparePreview() {
-  const tab = await activeArenaTab();
-  if (!tab) return;
-  prepared = null;
-  downloaded = false;
+  if (preparing) return;
   preparing = true;
   btn.disabled = true;
+  resnapshotBtn.disabled = true;
   btn.textContent = 'Preparing history…';
   setPreparationControlsDisabled(true);
-  sizePreview.hidden = true;
-  savedValue.textContent = '';
+  resnapshotBtn.disabled = true;
+  const tab = await activeArenaTab();
+  if (!tab) {
+    preparing = false;
+    btn.disabled = false;
+    resnapshotBtn.disabled = false;
+    btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
+    setPreparationControlsDisabled(!!prepared);
+    return;
+  }
+  setPreparationControlsDisabled(true);
+  resnapshotBtn.disabled = true;
   progress.hidden = false;
   logEl.replaceChildren();
   for (const key in lines) delete lines[key];
-  say('');
+  say(prepared ? 'Taking a fresh snapshot. The previous preview remains available until this one is ready.' : '');
   try {
     const connection = await ensurePort(tab.id);
     connection.postMessage({
@@ -249,8 +281,9 @@ async function preparePreview() {
   } catch (error) {
     preparing = false;
     btn.disabled = false;
-    btn.textContent = 'Prepare preview';
-    setPreparationControlsDisabled(false);
+    resnapshotBtn.disabled = false;
+    btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
+    setPreparationControlsDisabled(!!prepared);
     say(String(error?.message || error), 'error');
   }
 }
@@ -260,28 +293,27 @@ async function downloadPrepared() {
   btn.disabled = true;
   btn.textContent = 'Saving…';
   const preview = AREX.compressMarkdown(prepared.markdown, { mode: compressionMode() });
-  const url = URL.createObjectURL(new Blob([preview.markdown], { type: 'text/markdown;charset=utf-8' }));
+  const blob = new Blob([preview.markdown], { type: 'text/markdown;charset=utf-8' });
+  preview.bytes = blob.size;
+  const url = URL.createObjectURL(blob);
   try {
     await chrome.downloads.download({ url, filename: prepared.filename, saveAs: true });
     port?.postMessage({ type: 'AREX_DOWNLOAD_ACK' });
     const savedFilename = prepared.filename;
     const { messages, expandedSpoilers } = prepared.stats;
-    downloaded = true;
-    prepared = null;
-    setPreparationControlsDisabled(false);
-    sizePreview.hidden = true;
+    sizeValue.textContent = kb(blob.size);
+    sizeExactValue.textContent = AREX.formatByteCount(blob.size);
     btn.disabled = false;
-    btn.textContent = 'Prepare another preview';
-    const stats = preview.stats;
+    btn.textContent = 'Download Markdown';
     const details = [];
-    if (stats.deduplicated) details.push(stats.deduplicated + ' duplicate output(s) linked');
-    if (stats.smartCompacted) details.push(stats.smartCompacted + ' log block(s) compacted');
-    if (stats.stubbed) details.push(stats.stubbed + ' earlier read(s) stubbed');
+    if (preview.stats.deduplicated) details.push(preview.stats.deduplicated + ' duplicate output(s) linked');
+    if (preview.stats.smartCompacted) details.push(preview.stats.smartCompacted + ' log block(s) compacted');
+    if (preview.stats.stubbed) details.push(preview.stats.stubbed + ' earlier read(s) stubbed');
     const detailText = details.length ? '\n' + details.join(' · ') : '';
     say(
       'Saved as ' + savedFilename + '\n' + messages + ' messages · ' +
-        expandedSpoilers + ' spoilers · ' + kb(preview.bytes) +
-        ' · ~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens' + detailText,
+        expandedSpoilers + ' spoilers · ' + AREX.formatByteCount(blob.size) +
+        ' (' + kb(blob.size) + ') · ~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens' + detailText,
       'ok',
     );
   } catch (error) {
@@ -295,11 +327,15 @@ async function downloadPrepared() {
 
 btn.addEventListener('click', async () => {
   if (preparing) return;
-  if (prepared && !downloaded) {
+  if (prepared) {
     await downloadPrepared();
     return;
   }
   await preparePreview();
+});
+
+resnapshotBtn.addEventListener('click', () => {
+  if (!preparing) void preparePreview();
 });
 
 [optActivity, optTimestamps, optCompress].forEach(control => control.addEventListener('change', () => {
@@ -314,4 +350,33 @@ modeButtons.forEach(button => button.addEventListener('click', () => {
   if (prepared) renderSizePreview();
 }));
 
-activeArenaTab();
+async function restorePreviousSnapshot() {
+  await optionsReady;
+  try {
+    const snapshot = await AREX_RESULT_STORE.load();
+    if (snapshot && typeof snapshot.markdown === 'string' && snapshot.filename) {
+      prepared = snapshot;
+      resnapshotBtn.hidden = false;
+      resnapshotBtn.disabled = false;
+      btn.textContent = 'Download Markdown';
+      setPreparationControlsDisabled(true);
+      renderSizePreview();
+      const when = snapshot.createdAt ? new Date(snapshot.createdAt).toLocaleString() : 'previous session';
+      const warnings = snapshot.warnings?.length ? '\n⚠ ' + snapshot.warnings.join('\n⚠ ') : '';
+      say('Previous snapshot restored · ' + when + '\nChoose a compression mode, download it, or retake the snapshot.' + warnings);
+    } else {
+      setPreparationControlsDisabled(false);
+      resnapshotBtn.hidden = true;
+      btn.textContent = 'Prepare preview';
+    }
+  } catch (error) {
+    setPreparationControlsDisabled(false);
+    resnapshotBtn.hidden = true;
+    btn.textContent = 'Prepare preview';
+    say('Could not restore the previous snapshot: ' + String(error?.message || error), 'warn');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+void restorePreviousSnapshot();

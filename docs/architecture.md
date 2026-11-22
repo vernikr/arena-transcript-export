@@ -14,7 +14,8 @@ Dev-only dep: jsdom (unit tests against a saved transcript fixture).
 ```
 extension/
   manifest.json            MV3: content scripts on https://arena.ai/agent/*, perms downloads+storage+scripting
-  popup/popup.html|.js     UI: export button, options, live progress; triggers download
+  popup/popup.html|.js      UI: persistent preview, compression modes, progress, download/retake
+  popup/result-store.js    IndexedDB persistence for the latest raw Markdown snapshot
   content/selectors.js     AREX.S — all DOM queries in one place (page churn containment)
   content/util.js          sleep, settle (MutationObserver quiet window), text extraction, slug
   content/loader.js        1️⃣ history gate: force-load earlier pages via scroll-to-top
@@ -38,7 +39,9 @@ EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoile
                              first-id stable ×N      expanded=false]    popup size preview
                              (+ retry button)        remains (nested)    + compression
                                                                                 │
-                                                                  download selected output
+                                                        IndexedDB snapshot ←───┤
+                                                                                │
+                                                    download selected / retake
 ```
 
 1. **History gate** (`loader.js`). Arena pages the transcript (20/turn page, earlier pages mount
@@ -51,11 +54,12 @@ EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoile
    ~2–3 s instead of waiting out long timeouts).
 2. **Spoiler gate** (`expand.js`). Collapsed spoilers don't exist in the DOM (unmounted, not
    hidden), and groups mount nested collapsed children when opened → iterative passes:
-   click visible `button[aria-expanded="false"]` inside `div[role="log"]` in batches of ten,
-   yielding between batches so the page can render and report progress; wait for the DOM to settle
-   (MutationObserver quiet ≥250 ms, cap 3 s), then repeat. Stop on an empty pass; bail with a
-   warning if a pass makes no progress (stuck/disabled buttons). Message count is re-checked after
-   each pass — a change signals unexpected remounting (future windowing) and aborts export loudly.
+   click `button[aria-expanded="false"]` inside `div[role="log"]` in batches of 25, yielding
+   between batches so the page can render and report progress; avoid a computed-style read per
+   button. Wait for the DOM to settle (MutationObserver quiet ≥250 ms, cap 3 s), then repeat.
+   Stop on an empty pass; bail with a warning if a pass makes no progress (stuck/disabled buttons).
+   Message count is re-checked after each pass — a change signals unexpected remounting (future
+   windowing) and aborts export loudly. Keep the references to buttons opened by this run.
 3. **Serialization** (`serialize.js` + `markdown.js`). Order-preserving walk over
    `[data-agent-transcript-message]`, role by presence of `[data-user-message-layout]`.
    Everything stays inside `[role="log"]` ⇒ sidebar/preview/composer never enter the output.
@@ -74,7 +78,9 @@ EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoile
 | footer (Copy/time/duration)                                  | skipped; optional `*4:49 PM*` with `timestamps: true` |
 
 Fence size auto-extends when content contains backticks. Option `includeToolActivity: false`
-exports prose only (spoilers then skipped entirely).
+exports prose only (spoilers then skipped entirely). After serialization, the exporter closes only
+the spoiler controls it opened, in reverse order, so nested DOM panels are unmounted and memory can
+be reclaimed; spoilers that were already open before export remain open.
 
 ## Compression preview
 
@@ -88,13 +94,15 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
   head/tail-truncated.
 - **Stubs:** when the same file appears more than once, earlier large snapshots become four-line
   previews with an explicit superseded-read marker; the last snapshot stays complete.
-- The size card reports exact UTF-8 bytes, an approximate multilingual token count, and savings
-  against the raw serialized Markdown. The token estimator is deliberately lightweight and is not
-  a model-specific tokenizer.
+- The size card uses the final download Blob's exact byte length, displays exact UTF-8 bytes
+  plus decimal KB/MB, an approximate multilingual token count, and savings against raw Markdown.
+  Finder's “size on disk” is a separate filesystem allocation figure. The token estimator is
+  deliberately lightweight and is not a model-specific tokenizer.
 - A monotonicity guard falls back to raw Markdown if a selected transform would increase file size.
-- After the preview is downloaded, the raw copy is released from popup state. If the popup closes
-  after preparation but before download acknowledgement, the content script retains an in-page
-  raw-download fallback.
+- The latest raw snapshot is persisted in extension IndexedDB, outside the popup's short-lived
+  JavaScript memory. Reopening the popup restores it; the user can download again or retake it.
+- If the popup closes during an in-flight export, the content script retains an in-page raw-download
+  fallback.
 
 ## Delivery & UX details
 
@@ -103,7 +111,7 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
   `arena-<slug(branch title|uuid)>-<YYYYMMDD-HHmm>.md`.
 - If the popup closed mid-run, the content script falls back to an in-page `<a download>` click.
 - The popup follows `prefers-color-scheme` with native-Chrome tokens and renders a staged
-  progress log (`ul#log`): one line per stage (history / expand / serialize), spinner → ✓,
+  progress log (`ul#log`): one line per stage (history / expand / serialize / cleanup), spinner → ✓,
   granular counters from pipeline events (history pages and message counts, per-pass spoiler
   counts, final markdown bytes) and an ok/warn summary. Options persist via `chrome.storage.sync`.
 - Progress is emitted by every pipeline stage over the port (`AREX_PROGRESS`); the loader reports
@@ -127,7 +135,7 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
 | Tailwind class churn (`prose`, `max-w-3xl`, card colors) | depend on stable data/aria hooks only; classes used solely within fixture-tested heuristics with fallbacks |
 | Arena adds DOM windowing later | abort if message count shrinks mid-run; research shows none today |
 | Unknown activity block types (plans, diffs, reasoning variants) | generic fallbacks: labeled-card, any-`pre`, text-row; headers are free-text |
-| Huge branches (RAM, message-size limits) | expansion is unavoidable (user requirement); result string is streamed straight to download; ≤ tens of MB is fine |
+| Huge branches (RAM, message-size limits) | expansion is still needed for hidden content; process in batches, then close exporter-opened panels immediately after serialization; keep the raw snapshot in IndexedDB between popup opens |
 | i18n of "Loading earlier messages" | status text is matched explicitly; keep it aligned with the active Arena locale |
 
 ## Testing

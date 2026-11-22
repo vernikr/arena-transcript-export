@@ -39,10 +39,15 @@ exact UTF-8 Markdown size, an approximate token count, and savings against the r
 Switching modes recalculates the preview locally; **Download Markdown** saves the selected version
 without loading the Arena history again. The selected mode and options are remembered.
 
+The latest prepared snapshot is saved in extension IndexedDB. Reopening the popup restores its size
+preview and lets you download it again or choose **Retake snapshot** to capture the current branch.
+The size card shows exact UTF-8 bytes plus decimal MB; Finder's separate “size on disk” value includes
+filesystem allocation overhead.
+
 The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
 progress log: history paging (rounds/pages/message counts), spoiler expansion passes
-(opened counters), and the assembled Markdown size. The final line lists messages, expanded
-spoilers and any warnings. Token counts are estimates intended for comparison, not an exact
+(opened counters), cleanup of exporter-opened panels, and the assembled Markdown size. The final
+line lists messages, expanded spoilers and any warnings. Token counts are estimates intended for comparison, not an exact
 model-specific tokenizer result.
 
 ## Releases

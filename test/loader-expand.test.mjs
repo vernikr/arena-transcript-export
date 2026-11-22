@@ -99,6 +99,11 @@ function spoilerLog() {
   });
   const log = document.querySelector('[role="log"]');
   const mount = (btn, html, wireLeaves) => btn.addEventListener('click', () => {
+    if (btn.getAttribute('aria-expanded') === 'true') {
+      btn.setAttribute('aria-expanded', 'false');
+      btn.parentElement.querySelector(':scope > [style*="overflow: clip"]')?.remove();
+      return;
+    }
     btn.setAttribute('aria-expanded', 'true');
     const panel = document.createElement('div');
     panel.setAttribute('style', 'overflow: clip; height: auto; opacity: 1');
@@ -118,8 +123,27 @@ test('expander clicks nested spoilers until none remain', async () => {
   const r = await AREX.expandAllSpoilers(log);
   assert.equal(r.expanded, 3); // group + 2 nested
   assert.equal(r.stuck.length, 0);
+  assert.equal(r.openedButtons.length, 3);
   assert.equal(log.querySelectorAll('button[aria-expanded="false"]').length, 0);
   assert.equal(log.querySelectorAll('[style*="overflow: clip"]').length, 3);
+});
+
+test('collapses exporter-opened spoilers after serialization and releases nested panels', async () => {
+  const { AREX, log } = spoilerLog();
+  const result = await AREX.expandAllSpoilers(log);
+  assert.equal(log.querySelectorAll('[style*="overflow: clip"]').length, 3);
+
+  const progress = [];
+  const cleanup = await AREX.collapseOpenedSpoilers(result.openedButtons, {
+    onProgress: event => progress.push(event),
+    batchSize: 2,
+  });
+
+  assert.equal(cleanup.closed, 3);
+  assert.equal(log.querySelectorAll('button[aria-expanded="true"]').length, 0);
+  assert.equal(log.querySelectorAll('[style*="overflow: clip"]').length, 0);
+  assert.equal(log.querySelector('#group').getAttribute('aria-expanded'), 'false');
+  assert.ok(progress.length >= 2);
 });
 
 test('expander opens large batches incrementally and yields between them', async () => {
@@ -142,6 +166,28 @@ test('expander opens large batches incrementally and yields between them', async
   assert.equal(batches.map(p => p.openedThisPass).join(','), '10,20,25');
   assert.equal(batches.map(p => p.expanded).join(','), '10,20,25');
   assert.equal(batches.map(p => p.total).join(','), '25,25,25');
+});
+
+test('expander handles hundreds of spoilers in 25-item batches and closes them afterward', async () => {
+  const buttons = Array.from({ length: 500 }, (_, i) =>
+    '<button aria-expanded="false">item ' + i + '</button>').join('');
+  const { document, AREX } = makeEnv({
+    html: '<div role="log"><div data-agent-transcript-message data-chat-message-id="large">' + buttons + '</div></div>',
+  });
+  const log = document.querySelector('[role="log"]');
+  log.querySelectorAll('button').forEach(button => button.addEventListener('click', () => {
+    button.setAttribute('aria-expanded', button.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+  }));
+  const phases = [];
+  const expanded = await AREX.expandAllSpoilers(log, { onProgress: event => phases.push(event) });
+  assert.equal(expanded.expanded, 500);
+  assert.equal(expanded.openedButtons.length, 500);
+  assert.equal(phases.filter(event => event.phase === 'click').length, 20);
+  assert.equal(log.querySelectorAll('button[aria-expanded="true"]').length, 500);
+
+  const cleanup = await AREX.collapseOpenedSpoilers(expanded.openedButtons);
+  assert.equal(cleanup.closed, 500);
+  assert.equal(log.querySelectorAll('button[aria-expanded="true"]').length, 0);
 });
 
 test('expander reports stuck (non-expandable) buttons instead of looping', async () => {

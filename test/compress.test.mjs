@@ -50,20 +50,36 @@ test('Smart preserves error output and clips only large clean command output', (
   dom.window.close();
 });
 
-test('Compact Stubs keeps the latest file snapshot and leaves a preview for an earlier read', () => {
+test('Compact Stubs handles ordinary Read activity blocks without file-chip labels', () => {
   const { AREX, dom } = makeEnv();
-  const filename = name => '**📄 ' + name + '** _(TS)_\n\n';
-  const oldBody = Array.from({ length: 60 }, (_, i) => 'export const OLD_' + i + ' = ' + i + ';').join('\n');
-  const newBody = Array.from({ length: 60 }, (_, i) => 'export const NEW_' + i + ' = ' + i + ';').join('\n');
-  const raw = filename('config.ts') + fenced(oldBody, 'ts') + '\n\n' +
+  const nl = String.fromCharCode(10);
+  const oldBody = Array.from({ length: 60 }, (_, i) => 'export const OLD_' + i + ' = ' + i + ';').join(nl);
+  const newBody = Array.from({ length: 60 }, (_, i) => 'export const NEW_' + i + ' = ' + i + ';').join(nl);
+  const read = (body, elapsed) => '#### used Read src/config.ts ' + elapsed + 'ms' + nl + nl + fenced(body, 'text');
+  const raw = read(oldBody, 12) + nl + nl + read(newBody, 19);
+  const smart = AREX.compressMarkdown(raw, { mode: 'smart' });
+  const stubs = AREX.compressMarkdown(raw, { mode: 'stubs' });
+
+  assert.equal(stubs.stats.stubbed, 1);
+  assert.ok(stubs.markdown.includes('compact stub: earlier read of src/config.ts'));
+  assert.match(stubs.markdown, /NEW_59/);
+  assert.doesNotMatch(stubs.markdown, /OLD_59/);
+  assert.ok(stubs.bytes < smart.bytes);
+  assert.ok(stubs.bytes < stubs.baselineBytes);
+  dom.window.close();
+});
+
+test('Compact Stubs also recognises file artifact cards', () => {
+  const { AREX, dom } = makeEnv();
+  const nl = String.fromCharCode(10);
+  const filename = name => '**📄 ' + name + '** _(TS)_' + nl + nl;
+  const oldBody = Array.from({ length: 60 }, (_, i) => 'export const OLD_' + i + ' = ' + i + ';').join(nl);
+  const newBody = Array.from({ length: 60 }, (_, i) => 'export const NEW_' + i + ' = ' + i + ';').join(nl);
+  const raw = filename('config.ts') + fenced(oldBody, 'ts') + nl + nl +
     filename('config.ts') + fenced(newBody, 'ts');
   const result = AREX.compressMarkdown(raw, { mode: 'stubs' });
-
   assert.equal(result.stats.stubbed, 1);
-  assert.match(result.markdown, /compact stub: earlier read of config\.ts/);
-  assert.match(result.markdown, /NEW_59/);
-  assert.doesNotMatch(result.markdown, /OLD_59/);
-  assert.ok(result.bytes < result.baselineBytes);
+  assert.ok(result.markdown.includes('compact stub: earlier read of config.ts'));
   dom.window.close();
 });
 
@@ -73,6 +89,8 @@ test('size preview reports UTF-8 bytes and a multilingual token estimate', () =>
   assert.equal(metrics.bytes, new TextEncoder().encode('Hello мир 🌍').length);
   assert.ok(metrics.estimatedTokens > 0);
   assert.equal(AREX.formatBytes(2048), '2.0 KB');
+  assert.equal(AREX.formatBytes(1754125), '1.75 MB');
+  assert.equal(AREX.formatByteCount(1754125), '1,754,125 B');
   assert.match(AREX.formatTokenCount(12460), /^12\.5k$/);
   dom.window.close();
 });

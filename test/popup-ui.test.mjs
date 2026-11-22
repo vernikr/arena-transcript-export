@@ -28,6 +28,11 @@ test('popup exposes compression modes, remembers selection, and disables them wi
     },
   };
   window.chrome = chromeMock;
+  let lastSavedSnapshot = null;
+  window.AREX_RESULT_STORE = {
+    async load() { return lastSavedSnapshot; },
+    async save(snapshot) { lastSavedSnapshot = { ...snapshot }; },
+  };
 
   const context = dom.getInternalVMContext();
   for (const path of ['../extension/content/compress.js', '../extension/popup/popup.js']) {
@@ -71,7 +76,7 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   const objectUrls = new Map();
   let nextObjectUrl = 0;
   chromeMock.tabs.sendMessage = (_tabId, _message, callback) =>
-    callback({ ok: true, compressionPreview: true });
+    callback({ ok: true, compressionPreview: true, featureVersion: '0.2.9' });
   chromeMock.tabs.connect = () => ({
     onDisconnect: { addListener() {} },
     onMessage: { addListener(listener) { onPortMessage = listener; } },
@@ -126,7 +131,57 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   assert.match(downloadedText, /collapsed 12 passing test lines/);
   assert.match($('#status').textContent, /Saved as arena-preview-test\.md/);
   assert.match($('#status').textContent, /4 messages · 3 spoilers/);
-  assert.equal($('[id="export"]').textContent, 'Prepare another preview');
+  assert.equal($('#sizeExactValue').textContent, new TextEncoder().encode(downloadedText).length.toLocaleString('en-US') + ' B');
+  assert.equal($('[id="export"]').textContent, 'Download Markdown');
+  assert.equal(lastSavedSnapshot.filename, 'arena-preview-test.md');
 
+  // A new popup instance restores the last snapshot and allows another capture.
   dom.window.close();
+  const reopened = new JSDOM(readFileSync(new URL('../extension/popup/popup.html', import.meta.url), 'utf8'), {
+    url: 'chrome-extension://test/popup/popup.html',
+    runScripts: 'outside-only',
+  });
+  reopened.window.matchMedia = () => ({ matches: false });
+  reopened.window.TextEncoder = TextEncoder;
+  let retakeStarted = false;
+  const reopenedChrome = {
+    storage: {
+      local: { set() {} },
+      sync: { get(defaults, callback) { callback({ ...defaults, ...stored }); }, set(value) { Object.assign(stored, value); } },
+    },
+    runtime: { sendMessage() { return Promise.resolve(); } },
+    tabs: {
+      async query() { return [{ id: 1, url: 'https://arena.ai/agent/test' }]; },
+      sendMessage(_tabId, _message, callback) { callback({ ok: true, compressionPreview: true, featureVersion: '0.2.9' }); },
+      connect() {
+        return {
+          onDisconnect: { addListener() {} },
+          onMessage: { addListener() {} },
+          postMessage(message) { if (message.type === 'AREX_EXPORT_START') retakeStarted = true; },
+        };
+      },
+    },
+  };
+  reopened.window.chrome = reopenedChrome;
+  reopened.window.AREX_RESULT_STORE = {
+    async load() { return lastSavedSnapshot; },
+    async save(snapshot) { lastSavedSnapshot = { ...snapshot }; },
+  };
+  const reopenedContext = reopened.getInternalVMContext();
+  vm.runInContext(readFileSync(new URL('../extension/content/compress.js', import.meta.url), 'utf8'), reopenedContext);
+  vm.runInContext(readFileSync(new URL('../extension/popup/popup.js', import.meta.url), 'utf8'), reopenedContext);
+  const r$ = selector => reopened.window.document.querySelector(selector);
+  const restoreDeadline = Date.now() + 1000;
+  while (r$('#sizePreview').hidden && Date.now() < restoreDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(r$('#export').textContent, 'Download Markdown');
+  assert.equal(r$('#resnapshot').hidden, false);
+  assert.ok(r$('#sizeExactValue').textContent.endsWith(' B'));
+  r$('#resnapshot').click();
+  const retakeDeadline = Date.now() + 1000;
+  while (!retakeStarted && Date.now() < retakeDeadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(retakeStarted, true);
+
+  reopened.window.close();
 });
