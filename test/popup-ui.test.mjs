@@ -75,9 +75,9 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   let downloadedText = '';
   const objectUrls = new Map();
   let nextObjectUrl = 0;
-  chromeMock.tabs.sendMessage = (_tabId, _message, callback) =>
-    callback({ ok: true, compressionPreview: true, featureVersion: '0.3.0' });
-  chromeMock.tabs.connect = () => ({
+  // The background coordinator is simulated: it answers AREX_EXPORT_START with
+  // a running status followed by a done status, and persists the snapshot itself.
+  chromeMock.runtime.connect = () => ({
     onDisconnect: { addListener() {} },
     onMessage: { addListener(listener) { onPortMessage = listener; } },
     postMessage(message) {
@@ -85,14 +85,30 @@ test('popup exposes compression modes, remembers selection, and disables them wi
         const passed = Array.from({ length: 12 }, (_, i) => '✓ suite > test-' + i + ' [1.00ms]').join('\n');
         const markdown = '**stdout:**\n\n' + String.fromCharCode(96).repeat(3) +
           'text\n' + passed + '\n' + String.fromCharCode(96).repeat(3);
-        queueMicrotask(() => onPortMessage({
-          type: 'AREX_RESULT',
-          ok: true,
-          markdown,
-          filename: 'arena-preview-test.md',
-          stats: { messages: 4, expandedSpoilers: 3 },
-          warnings: [],
-        }));
+        queueMicrotask(() => {
+          lastSavedSnapshot = {
+            markdown,
+            filename: 'arena-preview-test.md',
+            stats: { messages: 4, expandedSpoilers: 3 },
+            warnings: [],
+            createdAt: Date.now(),
+          };
+          onPortMessage({
+            type: 'AREX_STATUS',
+            job: {
+              tabId: 1, status: 'running', startedAt: Date.now(), updatedAt: Date.now(),
+              progress: [{ stage: 'history', phase: 'page', pages: 1, loaded: 12 }],
+            },
+          });
+          onPortMessage({
+            type: 'AREX_STATUS',
+            job: {
+              tabId: 1, status: 'done', startedAt: Date.now(), updatedAt: Date.now(),
+              progress: [{ stage: 'history', phase: 'page', pages: 1, loaded: 12 }],
+              resultMeta: { filename: 'arena-preview-test.md', bytes: markdown.length, stats: { messages: 4, expandedSpoilers: 3 }, warnings: [], createdAt: Date.now() },
+            },
+          });
+        });
       }
     },
   });
@@ -151,10 +167,8 @@ test('popup exposes compression modes, remembers selection, and disables them wi
       local: { set() {} },
       sync: { get(defaults, callback) { callback({ ...defaults, ...stored }); }, set(value) { Object.assign(stored, value); } },
     },
-    runtime: { sendMessage() { return Promise.resolve(); } },
-    tabs: {
-      async query() { return [{ id: 1, url: 'https://arena.ai/agent/test' }]; },
-      sendMessage(_tabId, _message, callback) { callback({ ok: true, compressionPreview: true, featureVersion: '0.3.0' }); },
+    runtime: {
+      sendMessage() { return Promise.resolve(); },
       connect() {
         return {
           onDisconnect: { addListener() {} },
@@ -162,6 +176,9 @@ test('popup exposes compression modes, remembers selection, and disables them wi
           postMessage(message) { if (message.type === 'AREX_EXPORT_START') retakeStarted = true; },
         };
       },
+    },
+    tabs: {
+      async query() { return [{ id: 1, url: 'https://arena.ai/agent/test' }]; },
     },
   };
   reopened.window.chrome = reopenedChrome;
@@ -188,11 +205,17 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   // Reopening during an active scan replays its current stage and disables conflicting actions.
   resumedMessageHandler({
     type: 'AREX_STATUS',
-    status: 'running',
-    progress: [{ stage: 'history', phase: 'page', pages: 3, loaded: 60 }],
+    job: {
+      tabId: 1,
+      status: 'running',
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      progress: [{ stage: 'history', phase: 'page', pages: 3, loaded: 60 }],
+    },
   });
   assert.equal(r$('#progress').hidden, false);
   assert.equal(r$('#export').disabled, true);
+  assert.equal(r$('#cancel').hidden, false);
   assert.match(r$('#log').textContent, /3 earlier page/);
   assert.match(r$('#status').textContent, /scan continued in the Arena tab/);
 

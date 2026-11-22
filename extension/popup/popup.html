@@ -74,7 +74,14 @@
   }
   #resnapshot:hover:not(:disabled) { background: var(--track); }
   #resnapshot:disabled { color: var(--disabled-fg); cursor: default; }
-  #export:focus-visible, #resnapshot:focus-visible, label.opt:focus-within, .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #cancel {
+    min-height: 30px; border: 1px solid var(--error); border-radius: 8px;
+    color: var(--error); background: transparent; font: inherit; font-size: 11.5px; cursor: pointer;
+  }
+  #cancel:hover:not(:disabled) { background: color-mix(in srgb, var(--error) 10%, transparent); }
+  #cancel:disabled { opacity: .6; cursor: default; }
+  #cancel[hidden] { display: none; }
+  #export:focus-visible, #resnapshot:focus-visible, #cancel:focus-visible, label.opt:focus-within, .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   #sizePreview {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -89,6 +96,29 @@
   #tokensValue { color: var(--secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
   #savedValue { color: var(--ok); font-size: 11px; font-weight: 500; text-align: right; }
   #savedValue:empty { display: none; }
+
+  #backgroundJobBanner:not([hidden]) {
+    display: flex; align-items: center; gap: 8px; margin: 6px 0 10px; padding: 8px 10px;
+    border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 8%, var(--track)); font-size: 11px; line-height: 16px;
+  }
+  #backgroundJobBanner[hidden] { display: none; }
+  #backgroundJobBanner span { flex: 1 1 auto; color: var(--fg); }
+  #backgroundJobBanner button {
+    flex: 0 0 auto; min-height: 26px; padding: 0 10px; border: 1px solid var(--accent); border-radius: 6px;
+    background: transparent; color: var(--accent); font: inherit; font-size: 11px; cursor: pointer;
+  }
+  #backgroundJobBanner button:hover { background: var(--track); }
+
+  #progressBar {
+    margin-top: 10px; height: 6px; border-radius: 4px; overflow: hidden;
+    background: var(--track); border: 1px solid var(--border);
+  }
+  #progressBar[hidden] { display: none; }
+  #progressFill {
+    height: 100%; width: 0%; background: var(--accent);
+    transition: width .35s ease;
+  }
 
   #progress { margin-top: 10px; }
   ul#log {
@@ -121,6 +151,11 @@
     <h1>Arena Transcript Export</h1>
   </header>
 
+  <div id="backgroundJobBanner" hidden role="status">
+    <span id="backgroundJobBannerText">An export is running in another Arena tab.</span>
+    <button id="backgroundJobSwitch" type="button">Switch</button>
+  </div>
+
   <label class="opt"><input type="checkbox" id="includeToolActivity" checked>
     <span><b>Expand &amp; include tool activity</b>
     <small>Reasoning blocks, command runs, edits — all spoilers, incl. nested.</small></span></label>
@@ -142,8 +177,10 @@
 
   <div class="actions">
     <button id="export">Prepare preview</button>
+    <button id="cancel" type="button" hidden>Cancel export</button>
     <button id="resnapshot" type="button" hidden>Retake snapshot</button>
   </div>
+  <div id="progressBar" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Export progress"><div id="progressFill"></div></div>
   <section id="sizePreview" hidden aria-live="polite">
     <div>
       <div id="sizeLabel">Final Markdown size</div>
@@ -157,7 +194,7 @@
   </section>
   <section id="progress" hidden><ul id="log"></ul><div id="status"></div></section>
   <script src="../content/compress.js"></script>
-  <script src="result-store.js"></script>
+  <script src="../shared/result-store.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

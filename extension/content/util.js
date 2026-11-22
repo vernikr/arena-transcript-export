@@ -15,9 +15,11 @@ AREX.settle = (root, { quietMs = 250, maxMs = 3000 } = {}) =>
   });
 
 // Wait for `cond()` to hold, polling. Returns true if met within timeout.
+// Aborts (throws an AbortError) as soon as AREX._abortController signals cancellation.
 AREX.waitFor = async (cond, { timeoutMs = 15000, pollMs = 250 } = {}) => {
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
+    AREX.throwIfAborted?.();
     if (cond()) return true;
     await AREX.sleep(pollMs);
   }

@@ -1,4 +1,7 @@
-/* Popup: prepare once, preview compression modes locally, then download. */
+/* Popup: prepare once, preview compression modes locally, then download.
+ * Talks to the background coordinator (AREX_POPUP port); the Arena tab talks
+ * to the background via AREX_JOB. The popup never injects scripts or messages
+ * the tab directly — closing the popup no longer affects the export. */
 (() => {
   const theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   chrome.storage.local.set({ theme });
@@ -8,6 +11,7 @@
 const $ = s => document.querySelector(s);
 const status = $('#status');
 const btn = $('#export');
+const cancelBtn = $('#cancel');
 const resnapshotBtn = $('#resnapshot');
 const sizeExactValue = $('#sizeExactValue');
 const optActivity = $('#includeToolActivity');
@@ -21,13 +25,15 @@ const sizeValue = $('#sizeValue');
 const tokensValue = $('#tokensValue');
 const savedValue = $('#savedValue');
 const progress = $('#progress');
+const progressBar = $('#progressBar');
+const progressFill = $('#progressFill');
 const logEl = $('#log');
+const banner = $('#backgroundJobBanner');
+const bannerText = $('#backgroundJobBannerText');
+const bannerSwitch = $('#backgroundJobSwitch');
 
-const CONTENT_FILES = [
-  'content/selectors.js', 'content/util.js', 'content/markdown.js', 'content/serialize.js',
-  'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/main.js',
-];
 const STAGE_ORDER = ['history', 'expand', 'serialize', 'cleanup'];
+const STAGE_PERCENT = { history: 10, expand: 45, serialize: 75, cleanup: 90, done: 100, cancel: 100 };
 const MODE_DESCRIPTIONS = {
   lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block.',
   smart: 'Lossless + removes terminal noise, folds long passing-test runs and trims very long clean logs. Error output is preserved.',
@@ -40,8 +46,10 @@ let port = null;
 let prepared = null;
 let preparing = false;
 let activeMode = 'lossless';
-let resolveOptionsReady;
-const optionsReady = new Promise(resolve => { resolveOptionsReady = resolve; });
+let currentTabId = null;
+let replayedProgress = 0;
+const optionsReadyRef = { resolve: null };
+const optionsReady = new Promise(resolve => { optionsReadyRef.resolve = resolve; });
 
 chrome.storage.sync.get({
   includeToolActivity: true,
@@ -55,7 +63,7 @@ chrome.storage.sync.get({
   activeMode = ['lossless', 'smart', 'stubs'].includes(options.compressionMode)
     ? options.compressionMode : 'lossless';
   updateCompressionControls();
-  resolveOptionsReady();
+  optionsReadyRef.resolve();
 });
 
 function persistOptions() {
@@ -85,53 +93,61 @@ function setPreparationControlsDisabled(disabled) {
   optTimestamps.disabled = disabled;
 }
 
+function setRunningUi(running) {
+  preparing = running;
+  btn.disabled = running;
+  resnapshotBtn.disabled = running;
+  cancelBtn.hidden = !running;
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = 'Cancel export';
+  setPreparationControlsDisabled(running || Boolean(prepared));
+  progress.hidden = false;
+  progressBar.hidden = false;
+  if (running) btn.textContent = 'Scanning…';
+}
+
+function setProgressPercent(value) {
+  const pct = Math.max(0, Math.min(100, Math.round(value)));
+  progressFill.style.width = pct + '%';
+  progressBar.setAttribute('aria-valuenow', String(pct));
+}
+
+function hideProgressChrome() {
+  progressBar.hidden = true;
+}
+
+function postToBackground(message) {
+  try {
+    if (port) { port.postMessage(message); return true; }
+  } catch { port = null; }
+  return false;
+}
+
 function activeArenaTab() {
   return chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-    if (!tab || !/^https:\/\/arena\.ai\/agent\//.test(tab.url || '')) {
-      progress.hidden = false;
-      logEl.replaceChildren();
-      say('Open an Arena.ai agent conversation to export it.', 'error');
-      return null;
-    }
+    if (!tab || !/^https:\/\/arena\.ai\/agent\//.test(tab.url || '')) return null;
     return tab;
   });
 }
 
-async function ensurePort(tabId) {
+function ensureBackgroundPort() {
   if (port) return port;
-  const readiness = await new Promise(resolve => {
-    let done = false;
-    const fin = value => { if (!done) { done = true; resolve(value); } };
-    try { chrome.tabs.sendMessage(tabId, { type: 'AREX_PING' }, response => fin(response || null)); }
-    catch { fin(null); }
-    setTimeout(() => fin(null), 800);
-  });
-  if (readiness?.ok && readiness.featureVersion !== '0.3.0') {
-    throw new Error('Reload this Arena tab once to activate the updated export extension.');
+  try {
+    port = chrome.runtime.connect({ name: 'AREX_POPUP' });
+  } catch {
+    port = null;
+    return null;
   }
-  if (!readiness?.ok) await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
-  port = chrome.tabs.connect(tabId, { name: 'AREX' });
   port.onDisconnect.addListener(() => { port = null; });
   port.onMessage.addListener(msg => {
-    if (msg.type === 'AREX_STATUS') onRemoteStatus(msg);
-    if (msg.type === 'AREX_PROGRESS') onProgress(msg);
-    if (msg.type === 'AREX_RESULT') onResult(msg);
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'AREX_STATUS') onBackgroundStatus(msg.job || null);
+    else if (msg.type === 'AREX_PROGRESS') onProgress(msg);
+    else if (msg.type === 'AREX_JOBS') onJobsList(msg.jobs || []);
+    else if (msg.type === 'AREX_ERROR') say(msg.error || 'The background worker reported an error.', 'error');
+    else if (msg.type === 'AREX_INMEMORY_RESULT') onInMemoryResult(msg);
   });
   return port;
-}
-
-function onRemoteStatus(message) {
-  for (const event of message.progress || []) onProgress(event);
-  if (['running', 'done', 'error'].includes(message.status)) progress.hidden = false;
-  if (message.status !== 'running') return;
-
-  preparing = true;
-  btn.disabled = true;
-  resnapshotBtn.disabled = true;
-  btn.textContent = 'Scanning…';
-  setPreparationControlsDisabled(true);
-  progress.hidden = false;
-  say('The scan continued in the Arena tab. Live progress is restored below.');
 }
 
 /* ----- staged progress log ----- */
@@ -149,7 +165,7 @@ function stageLine(stage) {
   const txt = document.createElement('span');
   li.append(ic, txt);
   logEl.append(li);
-  li.scrollIntoView({ block: 'nearest' });
+  li.scrollIntoView?.({ block: 'nearest' });
   lines[stage] = { li, ic, txt };
   return lines[stage];
 }
@@ -162,10 +178,28 @@ function setIcon(line, character, cls) {
 function setText(stage, value) {
   const line = stageLine(stage);
   line.txt.textContent = value;
-  line.li.scrollIntoView({ block: 'nearest' });
+  line.li.scrollIntoView?.({ block: 'nearest' });
+}
+function updatePercent(stage) {
+  if (stage && STAGE_PERCENT[stage] != null) setProgressPercent(STAGE_PERCENT[stage]);
+}
+function markStagesDone() {
+  for (const stage of STAGE_ORDER) if (lines[stage]) setIcon(lines[stage], '✓', 'tick');
+  setProgressPercent(100);
+}
+function markStagesFailed() {
+  for (const stage in lines) {
+    if (!lines[stage].li.classList.contains('done')) {
+      lines[stage].ic.className = 'ic';
+      lines[stage].ic.textContent = '✕';
+      lines[stage].ic.style.color = 'var(--error)';
+    }
+  }
 }
 
 function onProgress(message) {
+  if (currentTabId != null && message.tabId != null && message.tabId !== currentTabId) return;
+  if (STAGE_PERCENT[message.stage] != null) updatePercent(message.stage);
   switch (message.stage) {
     case 'history':
       if (message.phase === 'scan') setText('history', 'History: checking for earlier messages… (round ' + message.round + ', ' + message.loaded + ')');
@@ -188,7 +222,117 @@ function onProgress(message) {
     case 'cleanup':
       setText('cleanup', 'Cleanup: closing ' + message.closed + '/' + message.total + ' expanded spoilers…');
       break;
+    case 'cancel':
+      say('Cancelling the export…', 'warn');
+      break;
+    case 'done':
+      break; // completion is driven by AREX_STATUS
+    default:
+      break;
   }
+}
+
+async function snapshotFromStore() {
+  const snapshot = await AREX_RESULT_STORE.load();
+  return snapshot && typeof snapshot.markdown === 'string' && snapshot.filename ? snapshot : null;
+}
+
+async function prepareFromSnapshot(snapshot, { restored = false, warning = '' } = {}) {
+  prepared = snapshot;
+  resnapshotBtn.hidden = false;
+  resnapshotBtn.disabled = false;
+  btn.textContent = 'Download Markdown';
+  setPreparationControlsDisabled(true);
+  renderSizePreview();
+  const warnings = prepared.warnings?.length ? '\n⚠ ' + prepared.warnings.join('\n⚠ ') : '';
+  if (restored) {
+    const when = snapshot.createdAt ? new Date(snapshot.createdAt).toLocaleString() : 'previous session';
+    say('Previous snapshot restored · ' + when + '\nChoose a compression mode, download it, or retake the snapshot.' + warnings, warning ? 'warn' : '');
+  } else if (warning) {
+    say(warning + warnings, 'warn');
+  } else {
+    say(
+      'Preview ready · ' + prepared.stats.messages + ' messages · ' + prepared.stats.expandedSpoilers +
+        ' spoilers\nSwitch compression modes to update the size, then download.' + warnings,
+      warnings ? 'warn' : '',
+    );
+  }
+}
+
+async function onExportDoneFromBackground() {
+  preparing = false;
+  btn.disabled = false;
+  resnapshotBtn.disabled = false;
+  cancelBtn.hidden = true;
+  markStagesDone();
+  let storageWarning = '';
+  let snapshot = null;
+  try {
+    snapshot = await snapshotFromStore();
+  } catch (error) {
+    storageWarning = '⚠ Could not read the saved snapshot: ' + String(error?.message || error);
+  }
+  if (snapshot) {
+    await prepareFromSnapshot(snapshot, { warning: storageWarning });
+    return;
+  }
+  // Background could not persist the snapshot — ask it for the in-memory copy.
+  postToBackground({ type: 'AREX_GET_INMEMORY_RESULT', tabId: currentTabId });
+}
+
+function onInMemoryResult(message) {
+  if (!message?.ok || typeof message.markdown !== 'string') {
+    say('The export finished but its snapshot is unavailable: ' + (message?.error || 'unknown error'), 'error');
+    return;
+  }
+  void prepareFromSnapshot({
+    markdown: message.markdown,
+    filename: message.filename || 'arena-export.md',
+    stats: message.stats || { messages: 0, expandedSpoilers: 0 },
+    warnings: message.warnings || [],
+    createdAt: Date.now(),
+  }, { warning: '⚠ Could not save the snapshot to browser storage — download it now before closing the popup.' });
+}
+
+async function onBackgroundStatus(job) {
+  if (!job) return;
+  if (currentTabId != null && job.tabId !== currentTabId) return;
+  if (Array.isArray(job.progress)) {
+    const fresh = job.progress.slice(replayedProgress);
+    replayedProgress = job.progress.length;
+    for (const event of fresh) onProgress({ ...event, tabId: job.tabId });
+  }
+  if (job.status === 'running') {
+    setRunningUi(true);
+    say('The scan continued in the Arena tab. Live progress is restored below.');
+    return;
+  }
+  if (job.status === 'done' || job.status === 'saved') {
+    await onExportDoneFromBackground();
+    return;
+  }
+  if (job.status === 'error') {
+    preparing = false;
+    btn.disabled = false;
+    resnapshotBtn.disabled = false;
+    cancelBtn.hidden = true;
+    btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
+    setPreparationControlsDisabled(Boolean(prepared));
+    if (prepared) renderSizePreview();
+    say(job.error || 'Export failed.', 'error');
+    markStagesFailed();
+    if (job.hasInMemoryResult && !prepared) postToBackground({ type: 'AREX_GET_INMEMORY_RESULT', tabId: currentTabId });
+    return;
+  }
+}
+
+function onJobsList(jobs) {
+  const running = jobs.find(job => job.status === 'running');
+  if (!running || currentTabId != null) return;
+  banner.hidden = false;
+  bannerText.textContent = 'An export is running in another Arena tab' +
+    (running.chatUuid ? ' (' + running.chatUuid + ')' : '') + '.';
+  bannerSwitch.onclick = () => chrome.tabs.update(running.tabId, { active: true });
 }
 
 function compressionMode() {
@@ -213,60 +357,6 @@ function renderSizePreview() {
   prepared.preview = preview;
 }
 
-async function onResult(message) {
-  preparing = false;
-  btn.disabled = false;
-  resnapshotBtn.disabled = false;
-  if (!message.ok) {
-    btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
-    setPreparationControlsDisabled(!!prepared);
-    if (prepared) renderSizePreview();
-    say(message.error, 'error');
-    for (const stage in lines) {
-      if (!lines[stage].li.classList.contains('done')) {
-        lines[stage].ic.className = 'ic';
-        lines[stage].ic.textContent = '✕';
-        lines[stage].ic.style.color = 'var(--error)';
-      }
-    }
-    return;
-  }
-
-  prepared = {
-    markdown: message.markdown,
-    filename: message.filename,
-    stats: message.stats,
-    warnings: message.warnings || [],
-    createdAt: Date.now(),
-  };
-  let storageWarning = '';
-  let snapshotStored = false;
-  try {
-    await AREX_RESULT_STORE.save(prepared);
-    snapshotStored = true;
-  } catch (error) {
-    storageWarning = '\n⚠ Could not save this preview for the next popup opening: ' +
-      String(error?.message || error);
-  }
-  // Release the in-tab copy only after the durable popup-origin IndexedDB write succeeds.
-  if (snapshotStored) {
-    try { port?.postMessage({ type: 'AREX_RESULT_ACK' }); } catch { }
-  }
-
-  for (const stage of STAGE_ORDER) if (lines[stage]) setIcon(lines[stage], '✓', 'tick');
-  setPreparationControlsDisabled(true);
-  resnapshotBtn.hidden = false;
-  resnapshotBtn.disabled = false;
-  btn.textContent = 'Download Markdown';
-  renderSizePreview();
-  const warnings = message.warnings?.length ? '\n⚠ ' + message.warnings.join('\n⚠ ') : '';
-  say(
-    'Preview ready · ' + message.stats.messages + ' messages · ' + message.stats.expandedSpoilers +
-      ' spoilers\nSwitch compression modes to update the size, then download.' + warnings + storageWarning,
-    message.warnings?.length || storageWarning ? 'warn' : '',
-  );
-}
-
 async function preparePreview() {
   if (preparing) return;
   preparing = true;
@@ -274,39 +364,47 @@ async function preparePreview() {
   resnapshotBtn.disabled = true;
   btn.textContent = 'Preparing history…';
   setPreparationControlsDisabled(true);
-  resnapshotBtn.disabled = true;
   const tab = await activeArenaTab();
   if (!tab) {
     preparing = false;
     btn.disabled = false;
     resnapshotBtn.disabled = false;
     btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
-    setPreparationControlsDisabled(!!prepared);
+    setPreparationControlsDisabled(Boolean(prepared));
+    progress.hidden = false;
+    logEl.replaceChildren();
+    for (const key in lines) delete lines[key];
+    say('Open an Arena.ai agent conversation to export it.', 'error');
     return;
   }
-  setPreparationControlsDisabled(true);
-  resnapshotBtn.disabled = true;
+  currentTabId = tab.id;
+  replayedProgress = 0;
   progress.hidden = false;
+  progressBar.hidden = false;
+  setProgressPercent(2);
   logEl.replaceChildren();
   for (const key in lines) delete lines[key];
-  say(prepared ? 'Taking a fresh snapshot. The previous preview remains available until this one is ready.' : 'The scan continues in the Arena tab; you can close and reopen this popup.');
-  try {
-    const connection = await ensurePort(tab.id);
-    connection.postMessage({
-      type: 'AREX_EXPORT_START',
-      options: {
-        includeToolActivity: optActivity.checked,
-        timestamps: optTimestamps.checked,
-      },
-    });
-  } catch (error) {
+  const connection = ensureBackgroundPort();
+  if (!connection) {
     preparing = false;
     btn.disabled = false;
     resnapshotBtn.disabled = false;
     btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
-    setPreparationControlsDisabled(!!prepared);
-    say(String(error?.message || error), 'error');
+    setPreparationControlsDisabled(Boolean(prepared));
+    say('Could not reach the extension background worker. Reload the extension and retry.', 'error');
+    return;
   }
+  postToBackground({ type: 'AREX_HELLO', tabId: tab.id });
+  say(prepared ? 'Taking a fresh snapshot. The previous preview remains available until this one is ready.' : 'The scan continues in the Arena tab; you can close and reopen this popup.');
+  setRunningUi(true);
+  postToBackground({
+    type: 'AREX_EXPORT_START',
+    tabId: tab.id,
+    options: {
+      includeToolActivity: optActivity.checked,
+      timestamps: optTimestamps.checked,
+    },
+  });
 }
 
 async function downloadPrepared() {
@@ -354,6 +452,14 @@ btn.addEventListener('click', async () => {
   await preparePreview();
 });
 
+cancelBtn.addEventListener('click', () => {
+  if (!preparing) return;
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = 'Cancelling…';
+  say('Cancelling the export…', 'warn');
+  postToBackground({ type: 'AREX_EXPORT_CANCEL', tabId: currentTabId });
+});
+
 resnapshotBtn.addEventListener('click', () => {
   if (!preparing) void preparePreview();
 });
@@ -373,18 +479,10 @@ modeButtons.forEach(button => button.addEventListener('click', () => {
 async function restorePreviousSnapshot() {
   await optionsReady;
   try {
-    const snapshot = await AREX_RESULT_STORE.load();
-    if (snapshot && typeof snapshot.markdown === 'string' && snapshot.filename) {
-      prepared = snapshot;
-      progress.hidden = false;
-      resnapshotBtn.hidden = false;
-      resnapshotBtn.disabled = false;
-      btn.textContent = 'Download Markdown';
-      setPreparationControlsDisabled(true);
-      renderSizePreview();
-      const when = snapshot.createdAt ? new Date(snapshot.createdAt).toLocaleString() : 'previous session';
-      const warnings = snapshot.warnings?.length ? '\n⚠ ' + snapshot.warnings.join('\n⚠ ') : '';
-      say('Previous snapshot restored · ' + when + '\nChoose a compression mode, download it, or retake the snapshot.' + warnings);
+    const snapshot = await snapshotFromStore();
+    if (snapshot) {
+      await prepareFromSnapshot(snapshot, { restored: true });
+      hideProgressChrome();
     } else {
       setPreparationControlsDisabled(false);
       resnapshotBtn.hidden = true;
@@ -400,12 +498,25 @@ async function restorePreviousSnapshot() {
   }
 }
 
-async function reconnectToCurrentExport() {
+async function connectToCurrentTab() {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !/^https:\/\/arena\.ai\/agent\//.test(tab.url || '')) return;
-    const connection = await ensurePort(tab.id);
-    connection.postMessage({ type: 'AREX_GET_STATUS' });
+    const tab = await activeArenaTab();
+    if (!tab) {
+      // Not an Arena tab: listen for background activity and surface a switcher.
+      const connection = ensureBackgroundPort();
+      if (connection) {
+        postToBackground({ type: 'AREX_HELLO' });
+        postToBackground({ type: 'AREX_LIST_JOBS' });
+      }
+      return;
+    }
+    currentTabId = tab.id;
+    const connection = ensureBackgroundPort();
+    if (!connection) {
+      say(prepared ? status.textContent : 'Could not reach the extension background worker.', prepared ? '' : 'warn');
+      return;
+    }
+    postToBackground({ type: 'AREX_HELLO', tabId: tab.id });
   } catch (error) {
     const warning = 'Could not reconnect to the current Arena scan: ' + String(error?.message || error);
     say(prepared ? status.textContent + '\n⚠ ' + warning : warning, 'warn');
@@ -414,7 +525,7 @@ async function reconnectToCurrentExport() {
 
 async function initializePopup() {
   await restorePreviousSnapshot();
-  await reconnectToCurrentExport();
+  await connectToCurrentTab();
 }
 
 void initializePopup();
