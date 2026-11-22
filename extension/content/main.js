@@ -320,7 +320,7 @@ AREX.runExport = async function (options = {}) {
 if (typeof chrome !== 'undefined' && chrome.runtime?.id) {
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'AREX_PING') {
-      sendResponse({ ok: true, compressionPreview: true, featureVersion: '0.3.0' });
+      sendResponse({ ok: true, compressionPreview: true, featureVersion: '0.4.1' });
       return;
     }
     if (msg?.type === 'AREX_EXPORT_CANCEL') {

@@ -22,7 +22,7 @@ const CONTENT_FILES = [
   'content/selectors.js', 'content/util.js', 'content/markdown.js', 'content/serialize.js',
   'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/main.js',
 ];
-const CONTENT_FEATURE_VERSION = '0.3.0';
+const CONTENT_FEATURE_VERSION = '0.4.1';
 const MAX_TRACKED_JOBS = 30;
 const PROGRESS_CAP = 500;
 const CHUNK_LIMIT_CODE_UNITS = 64 * 1024 * 1024; // bound assembled UTF-16 string size

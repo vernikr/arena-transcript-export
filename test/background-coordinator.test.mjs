@@ -176,7 +176,7 @@ test('closed popup: progress continues, durable save precedes ACK, reopen restor
   const gate = new Promise(resolve => { releaseSave = resolve; });
   const store = { saved: [], async save(snapshot) { await gate; this.saved.push(snapshot); }, async load() { return this.saved.at(-1); } };
   const { captured, sessionData, chrome } = setup({ resultStore: store });
-  chrome.tabs.sendMessage = (_tabId, message, cb) => cb?.(message.type === 'AREX_PING' ? { ok: true, featureVersion: '0.3.0' } : undefined);
+  chrome.tabs.sendMessage = (_tabId, message, cb) => cb?.(message.type === 'AREX_PING' ? { ok: true, featureVersion: '0.4.1' } : undefined);
   const popup = makePort('AREX_POPUP'); captured.onConnect(popup);
   await popup.emit({ type: 'AREX_HELLO', tabId: 42 });
   await popup.emit({ type: 'AREX_EXPORT_START', tabId: 42, options: {} });

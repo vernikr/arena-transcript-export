@@ -5,3 +5,4 @@
 - Keep the progress estimate monotonic when lazy discovery increases the denominator.
 - Show expanded/total spoiler counts and the percentage in the popup log and toolbar tooltip.
 - Add regression tests for message-plus-spoiler work units and dynamic nested-spoiler discovery.
+- Bump the extension/package version to 0.4.1 and the content handshake version so open tabs re-inject the updated script.
