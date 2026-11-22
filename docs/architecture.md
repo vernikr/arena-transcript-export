@@ -15,6 +15,7 @@ Dev-only dep: jsdom (unit tests against a saved transcript fixture).
 extension/
   manifest.json            MV3: content scripts on https://arena.ai/agent/*, perms downloads+storage+scripting
   popup/popup.html|.js      UI: persistent preview, compression modes, progress, download/retake
+  popup/compress-worker.js  one indexed snapshot + cached compression modes off the UI thread
   background.js            export coordinator, IndexedDB persistence and toolbar indicator
   shared/result-store.js   IndexedDB persistence for the latest raw Markdown snapshot
   content/selectors.js     AREX.S — all DOM queries in one place (page churn containment)
@@ -78,21 +79,26 @@ be reclaimed; spoilers that were already open before export remain open.
 
 ## Compression preview
 
-The popup prepares the raw transcript once, then keeps that Markdown in memory while the user
-switches compression modes. `content/compress.js` applies the deterministic transforms locally;
-it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
+The popup sends the raw snapshot once to `popup/compress-worker.js`, which builds a single
+`BlockIndex` and caches each computed mode. `content/compress.js` works in both window and worker
+contexts; transforms edit indexed blocks and assemble the output once per mode. The UI ignores
+stale mode/snapshot replies and downloads the prepared result without recompression. If the worker
+is unavailable or fails, a local fallback keeps exports usable but can block the popup temporarily.
+Neither path revisits the Arena DOM or repeats history paging / spoiler expansion.
 
 - **Lossless:** exact duplicate fenced tool/file outputs are anchored once; later copies become links.
 - **Smart:** strips terminal ANSI/progress noise, folds runs of at least six recognised passing-test
   lines, and keeps the head/tail of very large clean stdout blocks. Error-signalled output is never
   head/tail-truncated.
-- **Stubs:** when the same file appears more than once, earlier large snapshots become four-line
-  previews with an explicit superseded-read marker; the last snapshot stays complete.
+- **Stubs:** when the same file appears more than once, earlier large reads or overwritten heredoc
+  writes become four-line previews with an explicit superseded marker. The latest is not stubbed,
+  but Smart may still shorten a long clean output. Simple `cat`, `sed -n`, `head`, `tail`, and `nl`
+  commands are paired with their own stdout; ambiguous shell expressions are left unclassified.
 - The size card uses the final download Blob's exact byte length, displays exact UTF-8 bytes
   plus decimal KB/MB, an approximate multilingual token count, and savings against raw Markdown.
   Finder's “size on disk” is a separate filesystem allocation figure. The token estimator is
   deliberately lightweight and is not a model-specific tokenizer.
-- A monotonicity guard falls back to raw Markdown if a selected transform would increase file size.
+- Each stage has a monotonicity guard: output cannot exceed the previous mode in UTF-8 bytes.
 - The latest raw snapshot is persisted in extension IndexedDB, outside the popup's short-lived
   JavaScript memory. Reopening the popup restores it; the user can download again or retake it.
 - The content script owns the task and retains up to 500 progress events plus the completed

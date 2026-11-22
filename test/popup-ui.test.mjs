@@ -133,7 +133,7 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   compress.click();
   $('[id="export"]').click();
   const deadline = Date.now() + 1500;
-  while ($('#sizePreview').hidden && Date.now() < deadline) {
+  while (!$('#sizeExactValue').textContent && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   assert.equal($('#sizePreview').hidden, false);
@@ -191,7 +191,7 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   vm.runInContext(readFileSync(new URL('../extension/popup/popup.js', import.meta.url), 'utf8'), reopenedContext);
   const r$ = selector => reopened.window.document.querySelector(selector);
   const restoreDeadline = Date.now() + 1000;
-  while (r$('#sizePreview').hidden && Date.now() < restoreDeadline) {
+  while (!r$('#sizeExactValue').textContent && Date.now() < restoreDeadline) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   assert.equal(r$('#export').textContent, 'Download Markdown');

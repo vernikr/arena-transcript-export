@@ -208,7 +208,7 @@ AREX.runExport = async function (options = {}) {
     const hist = await AREX.loadFullHistory(log, { onProgress: progress });
     const processed = await AREX.processMessagesInWindows(log, options, { onProgress: progress, onCleanup: progressBestEffort });
     const { markdown, expandedSpoilers, leftCollapsed, totalMessages } = processed;
-    const bytes = AREX.measureMarkdown(markdown).bytes;
+    const bytes = new TextEncoder().encode(markdown).length;
     progress({ stage: 'serialize', phase: 'done', bytes });
 
     const warnings = [];

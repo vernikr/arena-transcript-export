@@ -45,9 +45,13 @@ const kb = n => AREX.formatBytes(n);
 let port = null;
 let prepared = null;
 let preparing = false;
+let downloading = false;
 let activeMode = 'lossless';
 let currentTabId = null;
 let replayedProgress = 0;
+let compressionState = null;
+let nextSnapshotId = 0;
+let nextRequestId = 0;
 const optionsReadyRef = { resolve: null };
 const optionsReady = new Promise(resolve => { optionsReadyRef.resolve = resolve; });
 
@@ -244,6 +248,7 @@ async function snapshotFromStore() {
 
 async function prepareFromSnapshot(snapshot, { restored = false, warning = '' } = {}) {
   prepared = snapshot;
+  initializeCompression(snapshot);
   resnapshotBtn.hidden = false;
   resnapshotBtn.disabled = false;
   btn.textContent = 'Download Markdown';
@@ -344,22 +349,98 @@ function compressionMode() {
   return optCompress.checked && optActivity.checked ? activeMode : 'off';
 }
 
-function renderSizePreview() {
-  if (!prepared) return;
-  const preview = AREX.compressMarkdown(prepared.markdown, { mode: compressionMode() });
-  const outputBlob = new Blob([preview.markdown], { type: 'text/markdown;charset=utf-8' });
-  preview.bytes = outputBlob.size;
-  sizePreview.hidden = false;
-  sizeValue.textContent = kb(preview.bytes);
-  sizeExactValue.textContent = AREX.formatByteCount(preview.bytes);
-  tokensValue.textContent = '~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens';
-  if (preview.savedBytes > 0) {
-    const percent = Math.max(1, Math.round(preview.savedRatio * 100));
-    savedValue.textContent = '−' + percent + '% from ' + kb(preview.baselineBytes);
-  } else {
-    savedValue.textContent = '';
+// A worker owns one snapshot and its BlockIndex. Replacing the snapshot kills
+// the old worker, so obsolete expensive work cannot delay the new preview.
+function disableCompressionWorker(state, error) {
+  state.worker?.terminate(); state.worker = null;
+  for (const pending of state.pending.values()) pending.reject(error);
+  state.pending.clear();
+}
+
+function initializeCompression(snapshot) {
+  if (compressionState?.worker) compressionState.worker.terminate();
+  if (compressionState) for (const pending of compressionState.pending.values()) pending.reject(new Error('Snapshot replaced.'));
+  const state = { snapshot, id: ++nextSnapshotId, worker: null, pending: new Map(), cache: new Map(), requests: new Map(), fallbackIndex: null };
+  compressionState = state;
+  try {
+    if (typeof Worker === 'undefined') throw new Error('Workers are unavailable.');
+    const worker = new Worker('compress-worker.js');
+    state.worker = worker;
+    worker.onmessage = ({ data }) => {
+      const pending = state.pending.get(data?.requestId);
+      if (!pending) return;
+      state.pending.delete(data.requestId);
+      if (data.type === 'MODE_RESULT' && data.snapshotId === state.id) pending.resolve(data.result);
+      else pending.reject(new Error(data?.error || 'Compression worker failed.'));
+    };
+    worker.onerror = () => {
+      disableCompressionWorker(state, new Error('Compression worker stopped.'));
+    };
+    worker.postMessage({ type: 'INIT_SNAPSHOT', snapshotId: state.id, markdown: snapshot.markdown });
+  } catch {
+    state.worker?.terminate(); state.worker = null;
   }
-  prepared.preview = preview;
+}
+
+function previewFor(state, mode) {
+  if (state.cache.has(mode)) return Promise.resolve(state.cache.get(mode));
+  if (state.requests.has(mode)) return state.requests.get(mode);
+  const computeFallback = () => {
+    // Used only if Worker is unavailable or fails. Keep the export usable.
+    state.fallbackIndex ||= AREX.buildMarkdownIndex(state.snapshot.markdown);
+    return AREX.compressIndex(state.fallbackIndex, { mode });
+  };
+  let work;
+  if (state.worker) {
+    const requestId = ++nextRequestId;
+    work = new Promise((resolve, reject) => {
+      state.pending.set(requestId, { resolve, reject });
+      try { state.worker.postMessage({ type: 'GET_MODE', snapshotId: state.id, requestId, mode }); }
+      catch (error) { state.pending.delete(requestId); reject(error); }
+    }).catch(error => {
+      if (compressionState !== state) throw error;
+      disableCompressionWorker(state, error);
+      return computeFallback();
+    });
+  } else {
+    // Defer fallback to allow the popup to paint its busy state first.
+    work = new Promise(resolve => setTimeout(resolve, 0)).then(computeFallback);
+  }
+  const request = work.then(result => { state.cache.set(mode, result); return result; }).finally(() => state.requests.delete(mode));
+  state.requests.set(mode, request);
+  return request;
+}
+
+async function renderSizePreview() {
+  if (!prepared || !compressionState) return;
+  const state = compressionState, snapshot = prepared, mode = compressionMode();
+  snapshot.preview = null;
+  snapshot.previewMode = null;
+  sizePreview.hidden = false;
+  sizeValue.textContent = 'Calculating…';
+  sizeExactValue.textContent = '';
+  tokensValue.textContent = '';
+  savedValue.textContent = '';
+  if (!preparing && !downloading) btn.disabled = true;
+  try {
+    const preview = await previewFor(state, mode);
+    if (compressionState !== state || prepared !== snapshot || compressionMode() !== mode) return;
+    snapshot.preview = preview;
+    snapshot.previewMode = mode;
+    sizeValue.textContent = kb(preview.bytes);
+    sizeExactValue.textContent = AREX.formatByteCount(preview.bytes);
+    tokensValue.textContent = '~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens';
+    if (preview.savedBytes > 0) {
+      const percent = Math.max(1, Math.round(preview.savedRatio * 100));
+      savedValue.textContent = '−' + percent + '% from ' + kb(preview.baselineBytes);
+    }
+    if (!preparing && !downloading) btn.disabled = false;
+  } catch (error) {
+    if (compressionState !== state || prepared !== snapshot || compressionMode() !== mode) return;
+    sizeValue.textContent = 'Unavailable';
+    say('Could not calculate the preview: ' + String(error?.message || error), 'error');
+    if (!preparing && !downloading) btn.disabled = true;
+  }
 }
 
 async function preparePreview() {
@@ -413,21 +494,23 @@ async function preparePreview() {
 }
 
 async function downloadPrepared() {
-  if (!prepared || !prepared.preview) return;
+  if (downloading || !prepared || !prepared.preview || prepared.previewMode !== compressionMode()) return;
+  downloading = true;
+  const snapshot = prepared, selectedMode = snapshot.previewMode;
   btn.disabled = true;
   btn.textContent = 'Saving…';
-  const preview = AREX.compressMarkdown(prepared.markdown, { mode: compressionMode() });
+  const preview = snapshot.preview;
   const blob = new Blob([preview.markdown], { type: 'text/markdown;charset=utf-8' });
   preview.bytes = blob.size;
   const url = URL.createObjectURL(blob);
   try {
-    await chrome.downloads.download({ url, filename: prepared.filename, saveAs: true });
-    const savedFilename = prepared.filename;
-    const { messages, expandedSpoilers } = prepared.stats;
-    sizeValue.textContent = kb(blob.size);
-    sizeExactValue.textContent = AREX.formatByteCount(blob.size);
-    btn.disabled = false;
-    btn.textContent = 'Download Markdown';
+    await chrome.downloads.download({ url, filename: snapshot.filename, saveAs: true });
+    const savedFilename = snapshot.filename;
+    const { messages, expandedSpoilers } = snapshot.stats;
+    if (prepared === snapshot && compressionMode() === selectedMode) {
+      sizeValue.textContent = kb(blob.size);
+      sizeExactValue.textContent = AREX.formatByteCount(blob.size);
+    }
     const details = [];
     if (preview.stats.deduplicated) details.push(preview.stats.deduplicated + ' duplicate output(s) linked');
     if (preview.stats.smartCompacted) details.push(preview.stats.smartCompacted + ' log block(s) compacted');
@@ -440,10 +523,13 @@ async function downloadPrepared() {
       'ok',
     );
   } catch (error) {
-    btn.disabled = false;
-    btn.textContent = 'Download Markdown';
     say(String(error?.message || error), 'error');
   } finally {
+    downloading = false;
+    if (!preparing) {
+      btn.disabled = Boolean(prepared && (!prepared.preview || prepared.previewMode !== compressionMode()));
+      btn.textContent = prepared ? 'Download Markdown' : 'Prepare preview';
+    }
     setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
 }
@@ -499,7 +585,7 @@ async function restorePreviousSnapshot() {
     btn.textContent = 'Prepare preview';
     say('Could not restore the previous snapshot: ' + String(error?.message || error), 'warn');
   } finally {
-    btn.disabled = false;
+    btn.disabled = preparing || downloading || Boolean(prepared && (!prepared.preview || prepared.previewMode !== compressionMode()));
   }
 }
 

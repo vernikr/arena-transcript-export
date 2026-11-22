@@ -33,14 +33,16 @@ that tab stops the in-tab task.
   - **Lossless** — exact duplicate tool outputs are kept once; repeated blocks link to the original.
   - **Smart** — Lossless plus ANSI/progress-noise removal, collapsing long consecutive passing-test
     runs, and head/tail previews for very large clean command logs. Error output is retained.
-  - **Stubs** — Smart plus short previews for earlier large reads of a file when a later read of
-    the same file is present. The latest read remains complete.
+  - **Stubs** — Smart plus short previews for earlier large reads or overwritten heredoc writes
+    when a later version of the same file is present. The latest is not stubbed, but Smart may
+    still shorten a long clean output.
   - Turn compression off to export the raw Markdown.
 
 Click **Prepare preview** to load the full history and expand spoilers as each window is processed. The popup then shows the
 exact UTF-8 Markdown size, an approximate token count, and savings against the raw export.
-Switching modes recalculates the preview locally; **Download Markdown** saves the selected version
-without loading the Arena history again. The selected mode and options are remembered.
+Compression and token estimates run in a background Web Worker; switching modes uses a per-snapshot
+cache after the first calculation. **Download Markdown** saves the selected prepared result without
+recompressing it or loading the Arena history again. The selected mode and options are remembered.
 
 The latest prepared snapshot is saved in extension IndexedDB. Reopening the popup restores its size
 preview and lets you download it again or choose **Retake snapshot** to capture the current branch.
