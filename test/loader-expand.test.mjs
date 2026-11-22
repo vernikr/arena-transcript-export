@@ -55,6 +55,24 @@ test('loader stops quickly on single-page branches', async () => {
   assert.equal(r.stable, true);
 });
 
+test('loader ignores unrelated status notices inside transcript messages', async () => {
+  const { document, AREX } = makeEnv({
+    html: `<div role="log"><div class="max-w-3xl">
+      <div data-agent-transcript-message data-chat-message-id="notice">
+        <div role="status">The agent reached the tool-call limit for this turn. Send a message to continue where it left off.</div>
+      </div>
+    </div></div>`,
+  });
+  const phases = [];
+  const r = await AREX.loadFullHistory(document.querySelector('[role="log"]'), {
+    quickMs: 5, detectMs: 5, spinnerGoneMs: 10, maxRounds: 2,
+    onProgress: p => phases.push(p.phase),
+  });
+  assert.equal(r.stable, true);
+  assert.equal(r.messages, 1);
+  assert.equal(phases.includes('loading'), false);
+});
+
 test('loader clicks the "Load earlier messages" retry button', async () => {
   const { document, AREX } = makeEnv({
     html: `<div role="log"><div class="max-w-3xl">${MSG('a1')}</div><button>Load earlier messages</button></div>`,

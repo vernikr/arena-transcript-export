@@ -42,7 +42,8 @@ EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoile
    above on demand — see research). Loop: `log.scrollTo({top:0})` → the top sentinel's
    IntersectionObserver (rootMargin 200px) fires `loadEarlierMessages`; wait (≤8 s) for the message
    count or the first message id to change; click the "Load earlier messages" retry button if the
-   loader failed; finish after 2 quiet rounds (windows are short: sub-page branches — likely the
+   loader failed; only the matching loading-status text counts as an active request; finish after 2
+   quiet rounds (windows are short: sub-page branches — likely the
    server's non-paged "compat" mode — get quick rounds, so a fully-loaded branch is confirmed in
    ~2–3 s instead of waiting out long timeouts).
 2. **Spoiler gate** (`expand.js`). Collapsed spoilers don't exist in the DOM (unmounted, not
@@ -103,7 +104,7 @@ exports prose only (spoilers then skipped entirely).
 | Arena adds DOM windowing later | abort if message count shrinks mid-run; research shows none today |
 | Unknown activity block types (plans, diffs, reasoning variants) | generic fallbacks: labeled-card, any-`pre`, text-row; headers are free-text |
 | Huge branches (RAM, message-size limits) | expansion is unavoidable (user requirement); result string is streamed straight to download; ≤ tens of MB is fine |
-| i18n of "Loading earlier messages" retry | primary trigger is scrolling (lang-free); text button is only an error-recovery extra |
+| i18n of "Loading earlier messages" | status text is matched explicitly; keep it aligned with the active Arena locale |
 
 ## Testing
 

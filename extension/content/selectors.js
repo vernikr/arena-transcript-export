@@ -17,7 +17,8 @@ AREX.S = {
   ATTACH_NAME: 'span.truncate',
   FOOTER_COPY: 'button[aria-label="Copy"]',
   TIME: 'time',
-  LOADER: '[role="status"]',                    // "Loading earlier messages" spinner
+  LOADER: '[role="status"]',
+  LOADING_TEXT: /loading earlier messages/i,
   RETRY_TEXT: /load earlier messages/i,         // error-state retry (lang-dependent recovery only)
   OPEN_FILE: 'button[aria-label="Open file"]',
 };

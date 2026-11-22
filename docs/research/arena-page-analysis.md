@@ -13,7 +13,8 @@ Yes for **loading**: the transcript is paginated. In bundles:
 - A top sentinel inside `div[role="log"]` is watched by an `IntersectionObserver`
   (`{ root: logElement, rootMargin: "200px 0px 0px" }`); entering view calls `loadEarlierMessages()`.
 - Intermediate UI states: `role="status"` spinner text **"Loading earlier messages"**; on failure an
-  absolute-positioned `<button>` **"Load earlier messages"** (retry, text-lookup).
+  absolute-positioned `<button>` **"Load earlier messages"** (retry, text-lookup). Other status roles
+  can appear inside message content (e.g. tool-limit notices), so the loader matches the spinner text.
 - `LARGE_CHAT_UI_MESSAGE_THRESHOLD = 20`; telemetry `agent.chat.transcript_page_ready` carries
   `page: "older"`, `strategy: "bounded"`, `hasMore`.
 - Telemetry tracks `loadedMessageCount` vs `renderedMessageCount`

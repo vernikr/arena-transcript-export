@@ -4,7 +4,7 @@
 window.AREX = window.AREX || {};
 
 (function () {
-  const S = AREX.S, q = AREX.q;
+  const S = AREX.S;
 
   AREX.loadFullHistory = function (log, opts = {}) {
     const {
@@ -17,6 +17,7 @@ window.AREX = window.AREX || {};
     const count = () => AREX.messages(log).length;
     const firstId = () => AREX.msgId(AREX.messages(log)[0] || log);
     const retry = () => AREX.qq('button', log).find(b => S.RETRY_TEXT.test(AREX.text(b)));
+    const loading = () => AREX.qq(S.LOADER, log).some(el => S.LOADING_TEXT.test(AREX.text(el)));
     const emit = p => onProgress?.({ stage: 'history', target: stagnantTarget, ...p });
 
     let stagnant = 0, lastCount = count(), lastFirst = firstId(), pages = 0;
@@ -29,14 +30,14 @@ window.AREX = window.AREX || {};
         log.scrollTop = 0;
         emit({ phase: 'scan', round: round + 1, loaded: lastCount, stagnant });
         await AREX.waitFor(
-          () => count() !== lastCount || firstId() !== lastFirst || !!q(S.LOADER, log) || !!retry(),
+          () => count() !== lastCount || firstId() !== lastFirst || loading() || !!retry(),
           { timeoutMs: windowMs },
         );
         const c = count(), f = firstId();
         if (c === lastCount && f === lastFirst) {
-          if (q(S.LOADER, log)) {
-            emit({ phase: 'loading', loaded: lastCount }); // older page in flight
-            await AREX.waitFor(() => !q(S.LOADER, log) || !!retry(), { timeoutMs: spinnerGoneMs });
+          if (loading()) {
+            emit({ phase: 'loading', loaded: lastCount });
+            await AREX.waitFor(() => !loading() || !!retry(), { timeoutMs: spinnerGoneMs });
             continue; // a load finished without change → re-evaluate next round
           }
           stagnant++;
