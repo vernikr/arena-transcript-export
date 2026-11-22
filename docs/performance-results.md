@@ -20,10 +20,44 @@ On the project owner's Intel Core i7-9750H Mac, Node 22.22.2, jsdom (not a Chrom
 | No-sentinel history confirmation | — | 254.2 ms | Includes the 150 ms probe and 100 ms settle |
 | 100,000 in-process Map lookups | — | 0.5 ms | Only a cache lookup microbenchmark, **not** a worker/UI round trip |
 
+## Supplied Archive.zip: actual large snapshot
+
+A subsequent measurement used the supplied saved HTML (5,596,938 B), not the synthetic
+fixture. The archive stays outside the repository; only aggregate data is recorded here. On the
+same Intel i7-9750H Mac, Node 22.22.2, jsdom, baseline `73a0cbb`: median of 3 runs after one
+warm-up. The saved DOM has 32,383 elements, including 31,329 in the transcript, 12 messages,
+1,042 already expanded buttons and 1,155 fenced blocks. The URL is replaced with a fixed
+benchmark URL, explaining the small difference in output bytes vs. the original plan.
+
+| Measurement | Baseline | Current | Result |
+|---|---:|---:|---|
+| Synchronous serializer | 2,743.9 ms | 516.8 ms | **5.31×**; byte-identical after normalizing export timestamp |
+| Build index | — | 78.7 ms | measured separately |
+| Off | 302.3 ms / 1,612,422 B | 77.5 ms / 1,612,422 B | 0.00% reduction |
+| Lossless | 309.4 ms / 1,612,422 B | 84.4 ms / 1,612,422 B | 0.00% reduction |
+| Smart | 350.4 ms / 1,499,474 B | 90.6 ms / 1,470,678 B | 7.00% → **8.79%** reduction |
+| Stubs | 593.2 ms / 1,495,753 B | 122.6 ms / 1,318,678 B | 7.24% → **18.22%** reduction |
+
+Current compression times above **exclude** the separately measured index construction; baseline
+mode times include their parsing. Numbers are not apples-to-apples cold end-to-end timings.
+Current smart compacted 31 blocks; stubs also replaced 54 earlier reads/writes. Lossless found
+no byte-identical eligible blocks. The asynchronous message walker produced the same Markdown
+as synchronous serialization on the static snapshot. This does not measure the real windowed
+expand/serialize/collapse pipeline or the 175 panels closed in the saved page.
+
+The measured 5.31× falls short of the plan's 6–8× serializer target on this machine; the 8.79%
+and 18.22% reductions fall short of the projected 25–45%. These targets therefore remain unmet
+in this measurement, not verified outcomes. Times depend on the runtime and machine load.
+To reproduce, extract the main saved HTML outside the repository and run
+`npm run benchmark:archive -- /path/to/saved-page.html` (optional second argument: baseline git
+ref). The benchmark does not execute page scripts and prints only aggregate measurements, but
+the input itself may contain private conversation data: do not commit it or paste it into logs.
+
+## Synthetic fixture caveats
+
 The synthetic Markdown is the committed fixture snapshot repeated 24 times. It is deliberately
 very repetitive, so its 7.7% reduction in all three compression modes is not a prediction for
-real sessions. Timing depends on machine load, Node and jsdom. The 2.98× serializer result does
-not validate the plan's 6–8× target on its 1.6 MB `Archive.zip` example; the 3.46× token result
+real sessions. Timing depends on machine load, Node and jsdom. The 2.98× serializer result is only for the small fixture and does not validate the plan's 6–8× target on `Archive.zip`; the 3.46× token result
 does not validate a 10× target either. The measured no-sentinel path exceeds the plan's `<50 ms`
 target by design: it uses a 150 ms observation plus a 100 ms quiet settle. Optimizing it further
 requires balancing speed against silent late legacy pagination.
@@ -46,12 +80,13 @@ requires balancing speed against silent late legacy pagination.
 
 ## Remaining validation and limitations
 
-- The `Archive.zip` dataset from the plan was not supplied for this run. Its actual speedup,
-  25–45% compression target, very large DOM memory footprint, and browser main-thread behavior
-  have **not** been measured.
-- The installed unpacked extension was not exercised end-to-end against a logged-in Arena session
-  in this run. A headless Google Chrome launch did not load the unpacked extension from CLI flags;
-  do not infer full MV3 lifecycle coverage from the mocks or separate file-origin IndexedDB check.
+- The static Archive snapshot has now been measured in jsdom (above); real browser memory,
+  the expansion pipeline, main-thread behavior and the 25–45% compression target are **not**
+  established by that measurement.
+- The user reports manually checking the installed extension end-to-end in Chrome, including
+  popup close/reopen, cancellation, saving and downloading. No detailed test log or browser
+  performance profile was captured. The earlier automated headless launch did not load the
+  unpacked extension; mocks and file-origin checks are not full MV3 integration tests.
 - A four-message window limits panels opened by the exporter, not the size of one message or panels
   the user had already opened. Individual large Markdown conversions can still block synchronously.
 - A marker-free legacy page which starts loading silently only after the initial probe can be

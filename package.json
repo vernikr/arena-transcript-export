@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "benchmark": "node scripts/benchmark.mjs"
+    "benchmark": "node scripts/benchmark.mjs",
+    "benchmark:archive": "node --expose-gc scripts/benchmark-archive.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.8",
