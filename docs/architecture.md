@@ -21,6 +21,7 @@ extension/
   content/expand.js        2️⃣ spoiler gate: click-expand loop until zero collapsed
   content/markdown.js      HTML → Markdown (block-level recursive)
   content/serialize.js     3️⃣ message walk: roles, activity items, code cards → md
+  content/compress.js      deterministic Lossless/Smart/Stubs transforms + UTF-8/token metrics
   content/main.js          orchestrator + runtime message API (EXPORT_START/PING, PROGRESS)
 ```
 
@@ -30,12 +31,14 @@ All scripts share one global namespace `AREX` (manifest load order = init order)
 ## Pipeline (per export request)
 
 ```
-EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoilers ─▶ 3 serialize ─▶ deliver
+EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoilers ─▶ 3 serialize
                   │                 │                      │                    │
-        on /agent/* page?    scroll top until        until no            Blob → popup →
-        [role=log] ready     message count/          button[aria-        chrome.downloads
-                             first-id stable ×N      expanded=false]     (saveAs); fallback:
-                             (+ retry button)        remains (nested)    <a download> in page
+        on /agent/* page?    scroll top until        until no            raw Markdown
+        [role=log] ready     message count/          button[aria-              │
+                             first-id stable ×N      expanded=false]    popup size preview
+                             (+ retry button)        remains (nested)    + compression
+                                                                                │
+                                                                  download selected output
 ```
 
 1. **History gate** (`loader.js`). Arena pages the transcript (20/turn page, earlier pages mount
@@ -72,6 +75,26 @@ EXPORT_START ─▶ page ready ─▶ 1 loadFullHistory ─▶ 2 expandAllSpoile
 
 Fence size auto-extends when content contains backticks. Option `includeToolActivity: false`
 exports prose only (spoilers then skipped entirely).
+
+## Compression preview
+
+The popup prepares the raw transcript once, then keeps that Markdown in memory while the user
+switches compression modes. `content/compress.js` applies the deterministic transforms locally;
+it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
+
+- **Lossless:** exact duplicate fenced tool/file outputs are anchored once; later copies become links.
+- **Smart:** strips terminal ANSI/progress noise, folds runs of at least six recognised passing-test
+  lines, and keeps the head/tail of very large clean stdout blocks. Error-signalled output is never
+  head/tail-truncated.
+- **Stubs:** when the same file appears more than once, earlier large snapshots become four-line
+  previews with an explicit superseded-read marker; the last snapshot stays complete.
+- The size card reports exact UTF-8 bytes, an approximate multilingual token count, and savings
+  against the raw serialized Markdown. The token estimator is deliberately lightweight and is not
+  a model-specific tokenizer.
+- A monotonicity guard falls back to raw Markdown if a selected transform would increase file size.
+- After the preview is downloaded, the raw copy is released from popup state. If the popup closes
+  after preparation but before download acknowledgement, the content script retains an in-page
+  raw-download fallback.
 
 ## Delivery & UX details
 

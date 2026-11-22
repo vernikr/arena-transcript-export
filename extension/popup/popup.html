@@ -22,7 +22,7 @@
   }
   * { box-sizing: border-box; }
   body {
-    min-width: 320px; margin: 0; padding: 12px 14px 14px;
+    min-width: 340px; margin: 0; padding: 12px 14px 14px;
     background: var(--bg); color: var(--fg);
     font: 400 13px/20px Roboto, "Segoe UI", system-ui, sans-serif;
   }
@@ -32,23 +32,57 @@
 
   label.opt { display: flex; gap: 10px; align-items: flex-start; padding: 6px 2px; cursor: pointer; border-radius: 6px; }
   label.opt:hover { background: var(--track); }
-  label.opt input { margin: 3px 0 0; width: 15px; height: 15px; accent-color: var(--accent); }
+  label.opt input { margin: 3px 0 0; width: 15px; height: 15px; accent-color: var(--accent); flex: 0 0 auto; }
   label.opt b { font-weight: 500; display: block; }
   label.opt small { display: block; color: var(--secondary); font-size: 11px; line-height: 16px; }
+  label.opt:has(input:disabled) { opacity: .55; cursor: default; }
+
+  #compression {
+    margin-top: 5px; padding: 8px 9px 9px;
+    border: 1px solid var(--border); border-radius: 9px;
+    background: color-mix(in srgb, var(--track) 48%, transparent);
+  }
+  #modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 8px; }
+  .mode {
+    min-width: 0; padding: 6px 3px; border: 1px solid transparent; border-radius: 7px;
+    color: var(--secondary); background: transparent; font: inherit; font-size: 11px;
+    font-weight: 500; line-height: 16px; cursor: pointer;
+  }
+  .mode:hover:not(:disabled) { color: var(--fg); background: var(--track); }
+  .mode[aria-pressed="true"] {
+    background: var(--bg); border-color: var(--border); color: var(--fg);
+    box-shadow: 0 1px 2px rgba(0,0,0,.12);
+  }
+  .mode:disabled { opacity: .45; cursor: default; }
+  #modeDescription { margin: 6px 2px 0; color: var(--secondary); font-size: 10.5px; line-height: 15px; }
+  #compression.disabled #modes, #compression.disabled #modeDescription { display: none; }
 
   #export {
-    width: 100%; margin-top: 8px; height: 34px; border: 0; border-radius: 8px;
+    width: 100%; margin-top: 10px; min-height: 36px; border: 0; border-radius: 8px;
     background: var(--accent); color: var(--on-accent);
-    font: 500 13px/1 Roboto, "Segoe UI", system-ui, sans-serif; letter-spacing: .25px;
+    font: 500 13px/1 Roboto, "Segoe UI", system-ui, sans-serif; letter-spacing: .15px;
     cursor: pointer; transition: background .12s, box-shadow .12s;
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   }
   #export:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   #export:active:not(:disabled) { background: var(--accent-active); }
   #export:disabled { background: var(--disabled-bg); color: var(--disabled-fg); cursor: default; }
-  #export:focus-visible, label.opt:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #export:focus-visible, label.opt:focus-within, .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-  #progress { margin-top: 12px; }
+  #sizePreview {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    margin-top: 10px; padding: 9px 11px;
+    border: 1px solid var(--border); border-radius: 9px;
+    background: var(--track);
+  }
+  #sizePreview[hidden] { display: none; }
+  #sizeLabel { font-size: 11px; color: var(--secondary); }
+  #sizeValue { font-size: 15px; line-height: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #tokensValue { color: var(--secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+  #savedValue { color: var(--ok); font-size: 11px; font-weight: 500; text-align: right; }
+  #savedValue:empty { display: none; }
+
+  #progress { margin-top: 10px; }
   ul#log {
     margin: 0; padding: 6px 8px; list-style: none; max-height: 168px; overflow-y: auto;
     background: var(--track); border: 1px solid var(--border); border-radius: 8px;
@@ -63,7 +97,7 @@
   .tick { color: var(--ok); font-weight: 700; }
   ul#log li.done { color: var(--secondary); }
   ul#log li.active { color: var(--fg); }
-  #status { margin-top: 8px; white-space: pre-wrap; font-size: 12px; line-height: 18px; }
+  #status { margin-top: 8px; white-space: pre-wrap; font-size: 11.5px; line-height: 17px; }
   #status.error { color: var(--error); }
   #status.warn { color: var(--warn); }
   #status.ok { color: var(--ok); }
@@ -86,8 +120,31 @@
     <span><b>Message timestamps</b>
     <small>Add the visible message time to each heading.</small></span></label>
 
-  <button id="export">Export branch to Markdown</button>
+  <section id="compression">
+    <label class="opt"><input type="checkbox" id="compressHistory" checked>
+      <span><b>Compress history</b>
+      <small>Reduce repeated tool output and verbose command logs.</small></span></label>
+    <div id="modes" role="group" aria-label="Compression mode">
+      <button class="mode" type="button" data-mode="lossless" aria-pressed="true">Lossless</button>
+      <button class="mode" type="button" data-mode="smart" aria-pressed="false">Smart</button>
+      <button class="mode" type="button" data-mode="stubs" aria-pressed="false">Stubs</button>
+    </div>
+    <p id="modeDescription">Exact duplicate outputs are kept once and replaced by links to the original block.</p>
+  </section>
+
+  <button id="export">Prepare preview</button>
+  <section id="sizePreview" hidden aria-live="polite">
+    <div>
+      <div id="sizeLabel">Final Markdown size</div>
+      <div id="tokensValue"></div>
+    </div>
+    <div>
+      <div id="sizeValue">—</div>
+      <div id="savedValue"></div>
+    </div>
+  </section>
   <section id="progress" hidden><ul id="log"></ul><div id="status"></div></section>
+  <script src="../content/compress.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

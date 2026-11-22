@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Arena Transcript Export",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Export the current Arena.ai agent branch to Markdown: full history force-loaded, all spoilers (reasoning, tool runs) expanded.",
   "permissions": [
     "downloads",
@@ -35,6 +35,7 @@
         "content/serialize.js",
         "content/loader.js",
         "content/expand.js",
+        "content/compress.js",
         "content/main.js"
       ]
     }

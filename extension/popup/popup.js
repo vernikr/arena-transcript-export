@@ -1,69 +1,128 @@
-/* Popup: options, staged progress log, download trigger. Talks to the content script via a Port. */
-// UI-theme probe for the toolbar icon (see content/theme.js / background.js)
+/* Popup: prepare once, preview compression modes locally, then download. */
 (() => {
   const theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   chrome.storage.local.set({ theme });
   chrome.runtime.sendMessage({ arexTheme: theme }).catch(() => { });
 })();
+
 const $ = s => document.querySelector(s);
 const status = $('#status');
 const btn = $('#export');
 const optActivity = $('#includeToolActivity');
 const optTimestamps = $('#timestamps');
+const optCompress = $('#compressHistory');
+const compression = $('#compression');
+const modeButtons = [...document.querySelectorAll('.mode')];
+const modeDescription = $('#modeDescription');
+const sizePreview = $('#sizePreview');
+const sizeValue = $('#sizeValue');
+const tokensValue = $('#tokensValue');
+const savedValue = $('#savedValue');
 const progress = $('#progress');
 const logEl = $('#log');
 
 const CONTENT_FILES = [
   'content/selectors.js', 'content/util.js', 'content/markdown.js', 'content/serialize.js',
-  'content/loader.js', 'content/expand.js', 'content/main.js',
+  'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/main.js',
 ];
 const STAGE_ORDER = ['history', 'expand', 'serialize'];
+const MODE_DESCRIPTIONS = {
+  lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block.',
+  smart: 'Lossless + removes terminal noise, folds long passing-test runs and trims very long clean logs. Error output is preserved.',
+  stubs: 'Smart + shortens earlier repeated file snapshots when a later read of the same file is included.',
+};
 const say = (text, cls = '') => { status.textContent = text; status.className = cls; };
-const kb = n => n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.ceil(n / 1024) + ' KB';
+const kb = n => AREX.formatBytes(n);
 
 let port = null;
-chrome.storage.sync.get({ includeToolActivity: true, timestamps: false }, o => {
-  optActivity.checked = o.includeToolActivity;
-  optTimestamps.checked = o.timestamps;
-});
-[optActivity, optTimestamps].forEach(c => c.addEventListener('change', () =>
-  chrome.storage.sync.set({ includeToolActivity: optActivity.checked, timestamps: optTimestamps.checked })));
+let prepared = null;
+let downloaded = false;
+let preparing = false;
+let activeMode = 'lossless';
 
-async function activeArenaTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !/^https:\/\/arena\.ai\/agent\//.test(tab.url || '')) {
-    progress.hidden = false;
-    logEl.replaceChildren();
-    say('Open an Arena.ai agent conversation to export it.', 'error');
-    btn.disabled = true;
-    return null;
-  }
-  return tab;
+chrome.storage.sync.get({
+  includeToolActivity: true,
+  timestamps: false,
+  compressHistory: true,
+  compressionMode: 'lossless',
+}, options => {
+  optActivity.checked = options.includeToolActivity;
+  optTimestamps.checked = options.timestamps;
+  optCompress.checked = options.compressHistory;
+  activeMode = ['lossless', 'smart', 'stubs'].includes(options.compressionMode)
+    ? options.compressionMode : 'lossless';
+  updateCompressionControls();
+});
+
+function persistOptions() {
+  chrome.storage.sync.set({
+    includeToolActivity: optActivity.checked,
+    timestamps: optTimestamps.checked,
+    compressHistory: optCompress.checked,
+    compressionMode: activeMode,
+  });
+}
+
+function updateCompressionControls() {
+  const available = optActivity.checked;
+  optCompress.disabled = !available;
+  compression.classList.toggle('disabled', !optCompress.checked || !available);
+  modeButtons.forEach(button => {
+    button.disabled = !available || !optCompress.checked;
+    button.setAttribute('aria-pressed', String(button.dataset.mode === activeMode));
+  });
+  modeDescription.textContent = available
+    ? MODE_DESCRIPTIONS[activeMode]
+    : 'Enable tool activity to compress command outputs and repeated file snapshots.';
+}
+
+function setPreparationControlsDisabled(disabled) {
+  optActivity.disabled = disabled;
+  optTimestamps.disabled = disabled;
+}
+
+function activeArenaTab() {
+  return chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+    if (!tab || !/^https:\/\/arena\.ai\/agent\//.test(tab.url || '')) {
+      progress.hidden = false;
+      logEl.replaceChildren();
+      say('Open an Arena.ai agent conversation to export it.', 'error');
+      btn.disabled = true;
+      return null;
+    }
+    return tab;
+  });
 }
 
 async function ensurePort(tabId) {
-  const alive = await new Promise(resolve => {
+  if (port) return port;
+  const readiness = await new Promise(resolve => {
     let done = false;
-    const fin = v => { if (!done) { done = true; resolve(v); } };
-    try { chrome.tabs.sendMessage(tabId, { type: 'AREX_PING' }, r => fin(!!(r && r.ok))); } catch { fin(false); }
-    setTimeout(() => fin(false), 800);
+    const fin = value => { if (!done) { done = true; resolve(value); } };
+    try { chrome.tabs.sendMessage(tabId, { type: 'AREX_PING' }, response => fin(response || null)); }
+    catch { fin(null); }
+    setTimeout(() => fin(null), 800);
   });
-  if (!alive) await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
-  try { port?.disconnect(); } catch { /* stale */ }
+  if (readiness?.ok && !readiness.compressionPreview) {
+    throw new Error('Reload this Arena tab once to activate the updated export extension.');
+  }
+  if (!readiness?.ok) await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
   port = chrome.tabs.connect(tabId, { name: 'AREX' });
+  port.onDisconnect.addListener(() => { port = null; });
+  port.onMessage.addListener(msg => {
+    if (msg.type === 'AREX_PROGRESS') onProgress(msg);
+    if (msg.type === 'AREX_RESULT') onResult(msg);
+  });
   return port;
 }
 
 /* ----- staged progress log ----- */
-const lines = {};           // stage → {li, ic, txt}
-let pagesLoaded = 0;
-
+const lines = {};
 function stageLine(stage) {
   if (lines[stage]) return lines[stage];
-  // stage becomes active → all earlier stages tick done
-  for (const s of STAGE_ORDER) {
-    if (s === stage) break;
-    if (lines[s]) setIcon(lines[s], '✓', 'tick');
+  for (const earlier of STAGE_ORDER) {
+    if (earlier === stage) break;
+    if (lines[earlier]) setIcon(lines[earlier], '✓', 'tick');
   }
   const li = document.createElement('li');
   li.className = 'active';
@@ -76,75 +135,183 @@ function stageLine(stage) {
   lines[stage] = { li, ic, txt };
   return lines[stage];
 }
-function setIcon(l, ch, cls) { l.ic.className = `ic ${cls}`; l.ic.textContent = ch; l.li.classList.remove('active'); l.li.classList.add('done'); }
-function setText(stage, t) { const l = stageLine(stage); l.txt.textContent = t; l.li.scrollIntoView({ block: 'nearest' }); }
+function setIcon(line, character, cls) {
+  line.ic.className = 'ic ' + cls;
+  line.ic.textContent = character;
+  line.li.classList.remove('active');
+  line.li.classList.add('done');
+}
+function setText(stage, value) {
+  const line = stageLine(stage);
+  line.txt.textContent = value;
+  line.li.scrollIntoView({ block: 'nearest' });
+}
 
-function onProgress(p) {
-  switch (p.stage) {
+function onProgress(message) {
+  switch (message.stage) {
     case 'history':
-      if (p.phase === 'scan') setText('history', `History: Checking for earlier messages… (round ${p.round}, ${p.loaded})`);
-      else if (p.phase === 'page') { pagesLoaded = p.pages; setText('history', `History: ${p.pages} earlier page(s) · ${p.loaded} messages…`); }
-      else if (p.phase === 'loading') setText('history', 'History: receiving older messages…');
-      else if (p.phase === 'retry') setText('history', 'History: retrying a failed page load…');
-      else if (p.phase === 'settle') setText('history', `History: verifying top of branch (${p.stagnant}/${p.target || 2}) · ${p.loaded} messages`);
+      if (message.phase === 'scan') setText('history', 'History: checking for earlier messages… (round ' + message.round + ', ' + message.loaded + ')');
+      else if (message.phase === 'page') setText('history', 'History: ' + message.pages + ' earlier page(s) · ' + message.loaded + ' messages…');
+      else if (message.phase === 'loading') setText('history', 'History: receiving older messages…');
+      else if (message.phase === 'retry') setText('history', 'History: retrying a failed page load…');
+      else if (message.phase === 'settle') setText('history', 'History: verifying top of branch (' + message.stagnant + '/' + (message.target || 2) + ') · ' + message.loaded + ' messages');
       else setText('history', 'History: settling…');
       break;
     case 'expand':
-      setText('expand', p.phase === 'settle'
-        ? `Spoilers: pass ${p.pass}, rendering… (${p.expanded} opened)`
-        : `Spoilers: pass ${p.pass}, opening ${p.openedThisPass}/${p.total}… (${p.expanded} total)`);
+      setText('expand', message.phase === 'settle'
+        ? 'Spoilers: pass ' + message.pass + ', rendering… (' + message.expanded + ' opened)'
+        : 'Spoilers: pass ' + message.pass + ', opening ' + message.openedThisPass + '/' + message.total + '… (' + message.expanded + ' total)');
       break;
     case 'serialize':
-      setText('serialize', p.phase === 'done' ? `Markdown: ${kb(p.bytes)} assembled` : 'Markdown: converting…');
+      setText('serialize', message.phase === 'done'
+        ? 'Markdown: ' + kb(message.bytes) + ' assembled'
+        : 'Markdown: converting…');
       break;
   }
 }
 
-function onResult(msg) {
+function compressionMode() {
+  return optCompress.checked && optActivity.checked ? activeMode : 'off';
+}
+
+function renderSizePreview() {
+  if (!prepared) return;
+  const preview = AREX.compressMarkdown(prepared.markdown, { mode: compressionMode() });
+  sizePreview.hidden = false;
+  sizeValue.textContent = kb(preview.bytes);
+  tokensValue.textContent = '~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens';
+  if (preview.savedBytes > 0) {
+    const percent = Math.max(1, Math.round(preview.savedRatio * 100));
+    savedValue.textContent = '−' + percent + '% from ' + kb(preview.baselineBytes);
+  } else {
+    savedValue.textContent = '';
+  }
+  prepared.preview = preview;
+}
+
+function onResult(message) {
+  preparing = false;
   btn.disabled = false;
-  if (!msg.ok) {
-    say(msg.error, 'error');
-    for (const s in lines) if (!lines[s].li.classList.contains('done')) {
-      lines[s].ic.className = 'ic'; lines[s].ic.textContent = '✕'; lines[s].ic.style.color = 'var(--error)';
+  if (!message.ok) {
+    prepared = null;
+    downloaded = false;
+    btn.textContent = 'Prepare preview';
+    setPreparationControlsDisabled(false);
+    say(message.error, 'error');
+    for (const stage in lines) {
+      if (!lines[stage].li.classList.contains('done')) {
+        lines[stage].ic.className = 'ic';
+        lines[stage].ic.textContent = '✕';
+        lines[stage].ic.style.color = 'var(--error)';
+      }
     }
     return;
   }
-  for (const s of STAGE_ORDER) if (lines[s]) setIcon(lines[s], '✓', 'tick');
-  const { messages, expandedSpoilers } = msg.stats;
-  const warn = msg.warnings?.length ? `\n⚠ ${msg.warnings.join('\n⚠ ')}` : '';
-  say(`Saved as ${msg.filename}\n${messages} messages · ${expandedSpoilers} spoilers · ${kb(msg.markdown.length)}${warn}`,
-    msg.warnings?.length ? 'warn' : 'ok');
+
+  prepared = message;
+  downloaded = false;
+  for (const stage of STAGE_ORDER) if (lines[stage]) setIcon(lines[stage], '✓', 'tick');
+  setPreparationControlsDisabled(true);
+  btn.textContent = 'Download Markdown';
+  renderSizePreview();
+  const warnings = message.warnings?.length ? '\n⚠ ' + message.warnings.join('\n⚠ ') : '';
+  say(
+    'Preview ready · ' + message.stats.messages + ' messages · ' + message.stats.expandedSpoilers +
+      ' spoilers\nSwitch compression modes to update the size, then download.' + warnings,
+    message.warnings?.length ? 'warn' : '',
+  );
+}
+
+async function preparePreview() {
+  const tab = await activeArenaTab();
+  if (!tab) return;
+  prepared = null;
+  downloaded = false;
+  preparing = true;
+  btn.disabled = true;
+  btn.textContent = 'Preparing history…';
+  setPreparationControlsDisabled(true);
+  sizePreview.hidden = true;
+  savedValue.textContent = '';
+  progress.hidden = false;
+  logEl.replaceChildren();
+  for (const key in lines) delete lines[key];
+  say('');
+  try {
+    const connection = await ensurePort(tab.id);
+    connection.postMessage({
+      type: 'AREX_EXPORT_START',
+      options: {
+        includeToolActivity: optActivity.checked,
+        timestamps: optTimestamps.checked,
+      },
+    });
+  } catch (error) {
+    preparing = false;
+    btn.disabled = false;
+    btn.textContent = 'Prepare preview';
+    setPreparationControlsDisabled(false);
+    say(String(error?.message || error), 'error');
+  }
+}
+
+async function downloadPrepared() {
+  if (!prepared || !prepared.preview) return;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  const preview = AREX.compressMarkdown(prepared.markdown, { mode: compressionMode() });
+  const url = URL.createObjectURL(new Blob([preview.markdown], { type: 'text/markdown;charset=utf-8' }));
+  try {
+    await chrome.downloads.download({ url, filename: prepared.filename, saveAs: true });
+    port?.postMessage({ type: 'AREX_DOWNLOAD_ACK' });
+    const savedFilename = prepared.filename;
+    const { messages, expandedSpoilers } = prepared.stats;
+    downloaded = true;
+    prepared = null;
+    setPreparationControlsDisabled(false);
+    sizePreview.hidden = true;
+    btn.disabled = false;
+    btn.textContent = 'Prepare another preview';
+    const stats = preview.stats;
+    const details = [];
+    if (stats.deduplicated) details.push(stats.deduplicated + ' duplicate output(s) linked');
+    if (stats.smartCompacted) details.push(stats.smartCompacted + ' log block(s) compacted');
+    if (stats.stubbed) details.push(stats.stubbed + ' earlier read(s) stubbed');
+    const detailText = details.length ? '\n' + details.join(' · ') : '';
+    say(
+      'Saved as ' + savedFilename + '\n' + messages + ' messages · ' +
+        expandedSpoilers + ' spoilers · ' + kb(preview.bytes) +
+        ' · ~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens' + detailText,
+      'ok',
+    );
+  } catch (error) {
+    btn.disabled = false;
+    btn.textContent = 'Download Markdown';
+    say(String(error?.message || error), 'error');
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
 }
 
 btn.addEventListener('click', async () => {
-  const tab = await activeArenaTab();
-  if (!tab) return;
-  btn.disabled = true;
-  logEl.replaceChildren();
-  for (const k in lines) delete lines[k];
-  pagesLoaded = 0;
-  progress.hidden = false;
-  say('');
-  try {
-    await ensurePort(tab.id);
-    port.onMessage.addListener(async msg => {
-      if (msg.type === 'AREX_PROGRESS') return onProgress(msg);
-      if (msg.type !== 'AREX_RESULT') return;
-      if (msg.ok) {
-        const url = URL.createObjectURL(new Blob([msg.markdown], { type: 'text/markdown;charset=utf-8' }));
-        try { await chrome.downloads.download({ url, filename: msg.filename, saveAs: true }); }
-        finally { setTimeout(() => URL.revokeObjectURL(url), 30000); }
-      }
-      onResult(msg);
-    });
-    port.postMessage({
-      type: 'AREX_EXPORT_START',
-      options: { includeToolActivity: optActivity.checked, timestamps: optTimestamps.checked },
-    });
-  } catch (err) {
-    btn.disabled = false;
-    say(String(err?.message || err), 'error');
+  if (preparing) return;
+  if (prepared && !downloaded) {
+    await downloadPrepared();
+    return;
   }
+  await preparePreview();
 });
+
+[optActivity, optTimestamps, optCompress].forEach(control => control.addEventListener('change', () => {
+  persistOptions();
+  updateCompressionControls();
+  if (prepared) renderSizePreview();
+}));
+modeButtons.forEach(button => button.addEventListener('click', () => {
+  activeMode = button.dataset.mode;
+  persistOptions();
+  updateCompressionControls();
+  if (prepared) renderSizePreview();
+}));
 
 activeArenaTab();

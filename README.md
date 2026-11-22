@@ -26,11 +26,24 @@ If you close it mid-run, the file is still delivered via an in-page download fal
 - **Expand & include tool activity** (default on) — click-open every spoiler and export its
   content as headed sections with fenced code. Off = prose only (fast).
 - **Message timestamps** (default off) — append the visible message time to each heading.
+- **Compress history** (default on) — choose one of three deterministic modes:
+  - **Lossless** — exact duplicate tool outputs are kept once; repeated blocks link to the original.
+  - **Smart** — Lossless plus ANSI/progress-noise removal, collapsing long consecutive passing-test
+    runs, and head/tail previews for very large clean command logs. Error output is retained.
+  - **Stubs** — Smart plus short previews for earlier large reads of a file when a later read of
+    the same file is present. The latest read remains complete.
+  - Turn compression off to export the raw Markdown.
+
+Click **Prepare preview** to load the full history and expand spoilers. The popup then shows the
+exact UTF-8 Markdown size, an approximate token count, and savings against the raw export.
+Switching modes recalculates the preview locally; **Download Markdown** saves the selected version
+without loading the Arena history again. The selected mode and options are remembered.
 
 The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
 progress log: history paging (rounds/pages/message counts), spoiler expansion passes
 (opened counters), and the assembled Markdown size. The final line lists messages, expanded
-spoilers and any warnings.
+spoilers and any warnings. Token counts are estimates intended for comparison, not an exact
+model-specific tokenizer result.
 
 ## Releases
 

@@ -3,6 +3,7 @@ window.AREX = window.AREX || {};
 
 AREX._port = null;
 AREX._running = false;
+AREX._pendingResult = null;
 
 AREX.runExport = async function (options = {}) {
   if (AREX._running) throw new Error('Export is already running in this tab.');
@@ -21,16 +22,17 @@ AREX.runExport = async function (options = {}) {
 
     progress({ stage: 'serialize', phase: 'start' });
     const markdown = AREX.serialize(log, options);
-    progress({ stage: 'serialize', phase: 'done', bytes: markdown.length });
+    const bytes = AREX.measureMarkdown(markdown).bytes;
+    progress({ stage: 'serialize', phase: 'done', bytes });
     const leftCollapsed = options.includeToolActivity !== false ? AREX.qq(AREX.S.COLLAPSED, log).length : 0;
 
     const warnings = [];
     if (!hist.stable) warnings.push('History loading stopped before the oldest message was confirmed — the branch may be truncated.');
-    if (leftCollapsed) warnings.push(`${leftCollapsed} spoiler(s) stayed collapsed (content unavailable).`);
+    if (leftCollapsed) warnings.push(leftCollapsed + ' spoiler(s) stayed collapsed (content unavailable).');
 
     const result = {
       markdown,
-      filename: `arena-${AREX.slug(AREX.chatTitle())}-${AREX.stamp()}.md`,
+      filename: 'arena-' + AREX.slug(AREX.chatTitle()) + '-' + AREX.stamp() + '.md',
       stats: { messages: AREX.messages(log).length, expandedSpoilers: expand.expanded },
       warnings,
     };
@@ -52,18 +54,33 @@ AREX.directDownload = function (markdown, filename) {
 
 if (typeof chrome !== 'undefined' && chrome.runtime?.id) {
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg?.type === 'AREX_PING') sendResponse({ ok: true });
+    if (msg?.type === 'AREX_PING') sendResponse({ ok: true, compressionPreview: true });
   });
   chrome.runtime.onConnect.addListener(port => {
     if (port.name !== 'AREX') return;
     AREX._port = port;
-    port.onDisconnect.addListener(() => { AREX._port = null; });
+    port.onDisconnect.addListener(() => {
+      const pending = AREX._pendingResult;
+      AREX._port = null;
+      if (pending) {
+        AREX._pendingResult = null;
+        AREX.directDownload(pending.markdown, pending.filename);
+      }
+    });
     port.onMessage.addListener(async msg => {
+      if (msg?.type === 'AREX_DOWNLOAD_ACK') {
+        AREX._pendingResult = null;
+        return;
+      }
       if (msg?.type !== 'AREX_EXPORT_START') return;
       try {
         const result = await AREX.runExport(msg.options || {});
-        if (AREX._port) AREX._port.postMessage({ type: 'AREX_RESULT', ok: true, ...result });
-        else AREX.directDownload(result.markdown, result.filename); // popup closed: still deliver
+        if (AREX._port) {
+          AREX._pendingResult = result;
+          AREX._port.postMessage({ type: 'AREX_RESULT', ok: true, ...result });
+        } else {
+          AREX.directDownload(result.markdown, result.filename);
+        }
       } catch (err) {
         AREX._port?.postMessage({ type: 'AREX_RESULT', ok: false, error: String(err?.message || err) });
       }
