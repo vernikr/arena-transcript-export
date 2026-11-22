@@ -61,14 +61,36 @@ if (global.gc) global.gc();
 const modern = compression(read), legacy = compression(old);
 const index = await bench(() => modern.buildMarkdownIndex(markdown));
 console.log(`Index: ${fmt(index.ms)} ms; blocks ${index.result.blocks.length}.`);
-let lastBytes = Infinity;
+let lastBytes = Infinity; const outputs = {};
 for (const mode of ['off','lossless','smart','stubs']) {
   const next = await bench(() => modern.compressIndex(index.result, {mode}));
-  const r = next.result;
+  const r = next.result; outputs[mode] = r;
   if (r.bytes !== Buffer.byteLength(r.markdown) || r.bytes > lastBytes) throw new Error(`Bad byte count or non-monotonic result: ${mode}`);
   lastBytes = r.bytes;
   const before = await bench(() => legacy.compressMarkdown(markdown, {mode}));
   if (before.result.bytes !== Buffer.byteLength(before.result.markdown)) throw new Error(`Bad baseline byte count: ${mode}`);
   console.log(`${mode}: current ${fmt(next.ms)} ms, ${r.bytes} B, saved ${(r.savedRatio*100).toFixed(2)}%, tokens ${r.estimatedTokens}, stats ${JSON.stringify(r.stats)}; baseline ${fmt(before.ms)} ms, ${before.result.bytes} B, saved ${(before.result.savedRatio*100).toFixed(2)}%.`);
+}
+// Verify that Stubs' additional references reconstruct the complete Smart
+// output. This does not undo Smart's deliberately lossy transformations.
+const anchorRe = /<a id="arex-stubs-output-(\d+)"><\/a>\n/g;
+const markerRe = /\[\.\.\. identical to lines (\d+)–(\d+) of earlier output #arex-stubs-output-(\d+) \.\.\.\]/g;
+if (outputs.smart.markdown.match(anchorRe) || outputs.smart.markdown.match(markerRe)) {
+  console.log('Stubs reconstruction skipped: input already contains reserved marker syntax.');
+} else {
+  const text = outputs.stubs.markdown, blocks = modern.buildMarkdownIndex(text).blocks, sources = new Map();
+  for (const match of text.matchAll(anchorRe)) {
+    const block = blocks.find(b => b.startOffset >= match.index + match[0].length);
+    if (!block || block.startOffset - match.index > 200) throw new Error('Stubs source anchor has no nearby fence');
+    sources.set(match[1], block.body.split('\n'));
+  }
+  let count = 0;
+  const reconstructed = text.replace(markerRe, (_, first, last, id) => {
+    const lines = sources.get(id), from = Number(first), to = Number(last);
+    if (!lines || from < 1 || to < from || to > lines.length) throw new Error('Invalid Stubs source line range');
+    count++; return lines.slice(from - 1, to).join('\n');
+  }).replace(anchorRe, '');
+  if (reconstructed !== outputs.smart.markdown) throw new Error('Stubs cannot be reconstructed to the Smart output');
+  console.log(`Stubs reconstruction to Smart: exact; ${sources.size} sources, ${count} references (Smart is lossy).`);
 }
 console.log('Current indexed mode timings exclude index construction; baseline mode timings include its parsing. No Chrome UI, expansion, network or memory measurements.');

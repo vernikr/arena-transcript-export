@@ -50,7 +50,7 @@ test('Smart preserves error output and clips only large clean command output', (
   dom.window.close();
 });
 
-test('Compact Stubs handles ordinary Read activity blocks without file-chip labels', () => {
+test('Compact Stubs preserves distinct versions in ordinary Read activity blocks', () => {
   const { AREX, dom } = makeEnv();
   const nl = String.fromCharCode(10);
   const oldBody = Array.from({ length: 60 }, (_, i) => 'export const OLD_' + i + ' = ' + i + ';').join(nl);
@@ -60,16 +60,14 @@ test('Compact Stubs handles ordinary Read activity blocks without file-chip labe
   const smart = AREX.compressMarkdown(raw, { mode: 'smart' });
   const stubs = AREX.compressMarkdown(raw, { mode: 'stubs' });
 
-  assert.equal(stubs.stats.stubbed, 1);
-  assert.ok(stubs.markdown.includes('compact stub: earlier read of src/config.ts'));
+  assert.equal(stubs.stats.stubbed, 0);
   assert.match(stubs.markdown, /NEW_59/);
-  assert.doesNotMatch(stubs.markdown, /OLD_59/);
-  assert.ok(stubs.bytes < smart.bytes);
-  assert.ok(stubs.bytes < stubs.baselineBytes);
+  assert.match(stubs.markdown, /OLD_59/);
+  assert.equal(stubs.markdown, smart.markdown);
   dom.window.close();
 });
 
-test('Compact Stubs also recognises file artifact cards', () => {
+test('Compact Stubs preserves distinct file artifact card content', () => {
   const { AREX, dom } = makeEnv();
   const nl = String.fromCharCode(10);
   const filename = name => '**📄 ' + name + '** _(TS)_' + nl + nl;
@@ -78,8 +76,9 @@ test('Compact Stubs also recognises file artifact cards', () => {
   const raw = filename('config.ts') + fenced(oldBody, 'ts') + nl + nl +
     filename('config.ts') + fenced(newBody, 'ts');
   const result = AREX.compressMarkdown(raw, { mode: 'stubs' });
-  assert.equal(result.stats.stubbed, 1);
-  assert.ok(result.markdown.includes('compact stub: earlier read of config.ts'));
+  assert.equal(result.stats.stubbed, 0);
+  assert.match(result.markdown, /OLD_59/);
+  assert.match(result.markdown, /NEW_59/);
   dom.window.close();
 });
 
@@ -111,8 +110,7 @@ test('BlockIndex pairs Bash reads with stdout, keeps paths case-sensitive and re
   for (const r of results) assert.equal(r.bytes, new TextEncoder().encode(r.markdown).length);
   assert.ok(results.every((r, i) => i === 0 || r.bytes <= results[i - 1].bytes));
   assert.match(results[2].markdown, /omitted \d+ middle lines/);
-  assert.equal(results[3].stats.stubbed, 1);
-  assert.match(results[3].markdown, /earlier read of service\.py/);
+  assert.equal(results[3].stats.stubbed, 0);
   assert.match(results[3].markdown, /NEW149Error/);
   assert.match(results[3].markdown, /OTHER149Error/);
   assert.match(results[3].markdown, /UPPER149Error/);
@@ -128,15 +126,14 @@ test('Bash file reads still preserve actual errors and explicit non-zero exit ou
   assert.doesNotMatch(failed.markdown, /omitted \d+ middle lines/);
 });
 
-test('Stubs abbreviates only earlier overwrites of the same heredoc target', () => {
+test('Stubs preserves unique earlier heredoc writes of the same target', () => {
   const { AREX } = makeEnv();
   const body = word => Array.from({ length: 90 }, (_, i) => `${word}_line_${i} = ${i}`).join('\n');
   const write = (path, word, cwd = '/repo') => `#### used Bash 1ms\n\n**command:**\n\n${fenced(`$ cd ${cwd} && cat > ${path} << 'PY'\n${body(word)}\nPY`, 'bash')}`;
   const raw = [write('file.py', 'OLD'), write('file.py', 'NEW'), write('file.py', 'OTHER', '/other')].join('\n\n');
   const result = AREX.compressMarkdown(raw, { mode: 'stubs' });
-  assert.equal(result.stats.stubbed, 1);
-  assert.match(result.markdown, /earlier write of file\.py/);
-  assert.doesNotMatch(result.markdown, /OLD_line_89/);
+  assert.equal(result.stats.stubbed, 0);
+  assert.match(result.markdown, /OLD_line_89/);
   assert.match(result.markdown, /NEW_line_89/);
   assert.match(result.markdown, /OTHER_line_89/);
 });
@@ -204,4 +201,69 @@ test('a paired stderr prevents shortening stdout of an otherwise plausible file 
   const result = AREX.compressMarkdown(raw, { mode: 'smart' });
   assert.doesNotMatch(result.markdown, /omitted \d+ middle lines/);
   assert.match(result.markdown, /source line 90/);
+});
+
+test('Stubs references only identical consecutive lines and preserves unique ranges and versions', () => {
+  const { AREX, dom } = makeEnv();
+  const source = Array.from({ length: 40 }, (_, i) => `shared source line ${i} = 'abcdefghijk'`);
+  const first = source.slice(0, 30).concat('ONLY_FIRST');
+  const second = ['ONLY_SECOND', ...source.slice(10, 35), 'ONLY_SECOND_END'];
+  const run = (command, lines, cwd = '/repo') => `#### used Bash 1ms\n\n**command:**\n\n${fenced(`$ cd ${cwd} && ${command}`, 'bash')}\n\n**stdout:**\n\n${fenced(lines.join('\n'))}`;
+  const raw = [run('sed -n 1,30p service.py', first), run('sed -n 10,35p service.py', second),
+    run('cat service.py', ['different file'], '/other')].join('\n\n');
+  const smart = AREX.compressMarkdown(raw, { mode: 'smart' });
+  const result = AREX.compressMarkdown(raw, { mode: 'stubs' });
+  assert.equal(result.stats.stubbed, 1);
+  assert.ok(result.bytes < smart.bytes);
+  assert.match(result.markdown, /ONLY_FIRST/); assert.match(result.markdown, /ONLY_SECOND_END/);
+  assert.match(result.markdown, /<a id="arex-stubs-output-1"><\/a>/);
+  const marker = /\[\.\.\. identical to lines (\d+)–(\d+) of earlier output #arex-stubs-output-1 \.\.\.\]/;
+  const match = result.markdown.match(marker); assert.ok(match);
+  const restored = result.markdown.replace('<a id="arex-stubs-output-1"></a>\n', '')
+    .replace(marker, first.slice(Number(match[1]) - 1, Number(match[2])).join('\n'));
+  assert.equal(restored, smart.markdown);
+  dom.window.close();
+});
+
+test('Stubs never references an output that is itself a shortened reference', () => {
+  const { AREX, dom } = makeEnv();
+  const shared = Array.from({ length: 35 }, (_, i) => `common line ${i} a long enough piece of text`);
+  const read = (prefix, content) => `#### used Read file.ts 1ms\n\n${fenced([prefix, ...content].join('\n'))}`;
+  const raw = [read('first', shared), read('second', shared), read('third', shared)].join('\n\n');
+  const result = AREX.compressMarkdown(raw, { mode: 'stubs' });
+  assert.equal(result.stats.stubbed, 2);
+  assert.equal((result.markdown.match(/id="arex-stubs-output-/g) || []).length, 1);
+  assert.equal((result.markdown.match(/earlier output #arex-stubs-output-1/g) || []).length, 2);
+  for (const word of ['first', 'second', 'third']) assert.match(result.markdown, new RegExp(word));
+  dom.window.close();
+});
+
+test('duplicate anchors retain the complete original output in Smart and Stubs', () => {
+  const { AREX, dom } = makeEnv();
+  const lines = Array.from({ length: 150 }, (_, i) => `build output ${i} ${'a'.repeat(50)}`);
+  const partial = lines.slice(0, 80).join('\n');
+  const full = lines.join('\n');
+  const read = body => `#### used Read file.ts 1ms\n\n${outputBlock(body)}`;
+  const raw = [read(partial), read(full), read(full)].join('\n\n');
+  for (const mode of ['lossless', 'smart', 'stubs']) {
+    const result = AREX.compressMarkdown(raw, { mode });
+    assert.equal(result.stats.deduplicated, 1);
+    assert.match(result.markdown, /<a id="arex-output-2"><\/a>\n```text\n/);
+    assert.match(result.markdown, /build output 90/);
+    const afterAnchor = result.markdown.split('<a id="arex-output-2"></a>\n')[1].split('\n```')[0];
+    assert.equal(afterAnchor, '```text\n' + full);
+  }
+  dom.window.close();
+});
+
+test('Stubs chooses anchor IDs that do not collide with original content', () => {
+  const { AREX, dom } = makeEnv();
+  const shared = Array.from({ length: 20 }, (_, i) => `shared line ${i} with enough content to reference safely`);
+  const read = prefix => `#### used Read file.ts 1ms\n\n${fenced([prefix, ...shared].join('\n'))}`;
+  const raw = 'Existing text mentions arex-stubs-output-1.\n\n' + read('first') + '\n\n' + read('second');
+  const result = AREX.compressMarkdown(raw, { mode: 'stubs' });
+  assert.equal(result.stats.stubbed, 1);
+  assert.match(result.markdown, /id="arex-stubs-output-2"/);
+  assert.match(result.markdown, /earlier output #arex-stubs-output-2/);
+  dom.window.close();
 });

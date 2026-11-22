@@ -83,7 +83,7 @@ AREX.filteredText = (root, { skip = () => false, spaced = false } = {}) => {
     if (node.nodeType === 3) return node.nodeValue;
     if (node.nodeType !== 1) return '';
     const pieces = [];
-    for (const child of node.childNodes) {
+    for (let child = node.firstChild; child; child = child.nextSibling) {
       if (child.nodeType === 1 && skip(child)) continue;
       pieces.push(walk(child));
     }

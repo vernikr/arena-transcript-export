@@ -37,7 +37,7 @@ const STAGE_PERCENT = { history: 10, expand: 45, serialize: 75, cleanup: 90, don
 const MODE_DESCRIPTIONS = {
   lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block.',
   smart: 'Lossless + removes terminal noise, folds long passing-test runs and trims very long clean logs. Error output is preserved.',
-  stubs: 'Smart + shortens earlier repeated file snapshots when a later read of the same file is included.',
+  stubs: 'Smart + references identical lines in earlier file outputs; Smart can still omit unique lines.',
 };
 const say = (text, cls = '') => { status.textContent = text; status.className = cls; };
 const kb = n => AREX.formatBytes(n);
@@ -514,7 +514,7 @@ async function downloadPrepared() {
     const details = [];
     if (preview.stats.deduplicated) details.push(preview.stats.deduplicated + ' duplicate output(s) linked');
     if (preview.stats.smartCompacted) details.push(preview.stats.smartCompacted + ' log block(s) compacted');
-    if (preview.stats.stubbed) details.push(preview.stats.stubbed + ' earlier read(s) stubbed');
+    if (preview.stats.stubbed) details.push(preview.stats.stubbed + ' file output(s) with repeated lines referenced');
     const detailText = details.length ? '\n' + details.join(' · ') : '';
     say(
       'Saved as ' + savedFilename + '\n' + messages + ' messages · ' +

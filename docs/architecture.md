@@ -90,10 +90,13 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
 - **Smart:** strips terminal ANSI/progress noise, folds runs of at least six recognised passing-test
   lines, and keeps the head/tail of very large clean stdout blocks. Error-signalled output is never
   head/tail-truncated.
-- **Stubs:** when the same file appears more than once, earlier large reads or overwritten heredoc
-  writes become four-line previews with an explicit superseded marker. The latest is not stubbed,
-  but Smart may still shorten a long clean output. Simple `cat`, `sed -n`, `head`, `tail`, and `nl`
-  commands are paired with their own stdout; ambiguous shell expressions are left unclassified.
+- **Stubs:** after Smart, replace only verified identical consecutive lines in a later read or
+  heredoc write with a marker identifying the earlier intact output and its line range. Reference
+  sources are never themselves stubbed; duplicate anchors used by Lossless retain their full body.
+  Different versions and non-overlapping ranges are not discarded merely because the path matches.
+  Smart remains lossy and can still shorten unique long output before this step. Simple `cat`,
+  `sed -n`, `head`, `tail`, and `nl` commands are paired with their own stdout; ambiguous shell
+  expressions are left unclassified.
 - The size card uses the final download Blob's exact byte length, displays exact UTF-8 bytes
   plus decimal KB/MB, an approximate multilingual token count, and savings against raw Markdown.
   Finder's “size on disk” is a separate filesystem allocation figure. The token estimator is

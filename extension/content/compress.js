@@ -212,6 +212,7 @@ globalThis.AREX = globalThis.AREX || {};
     if (!edit) return null;
     let content = edit.reference || (block.openLine + '\n' + (edit.body ?? block.body) + '\n' + block.closeLine);
     if (edit.anchor) content = '<a id="arex-output-' + edit.anchor + '"></a>\n' + content;
+    if (edit.stubAnchor) content = '<a id="arex-stubs-output-' + edit.stubAnchor + '"></a>\n' + content;
     return content;
   }
   const editBytes = (block, edit) => utf8Bytes(renderBlock(block, edit) ?? '');
@@ -245,7 +246,7 @@ globalThis.AREX = globalThis.AREX || {};
     if (mode === 'smart' || mode === 'stubs') {
       const smartEdits = new Map(edits); let smartBytes = bytes, count = 0;
       for (const block of blocks) {
-        if ((block.label !== 'stdout' && block.label !== 'stderr') || edits.get(block)?.reference) continue;
+        if ((block.label !== 'stdout' && block.label !== 'stderr') || edits.get(block)?.reference || edits.get(block)?.anchor) continue;
         let body = stripTerminalNoise(block.body);
         if (block.label === 'stdout') {
           body = collapsePassingRuns(body).text;
@@ -265,6 +266,9 @@ globalThis.AREX = globalThis.AREX || {};
       if (smartBytes <= bytes) { edits = smartEdits; bytes = smartBytes; stats.smartCompacted = count; }
     }
     if (mode === 'stubs') {
+      // Reuse only byte-identical consecutive lines that remain visible in an
+      // earlier output. Different reads/ranges and old file versions may contain
+      // unique information; a later read does not prove they were superseded.
       const groups = new Map();
       for (const block of blocks) {
         if (edits.get(block)?.reference || failed(block)) continue;
@@ -272,25 +276,68 @@ globalThis.AREX = globalThis.AREX || {};
         if (block.label === 'command') {
           const info = commandInfo(block.body);
           if (info?.kind !== 'write') continue;
-          type = 'write'; identity = { key: (info.path.startsWith('/') ? '' : info.cwd) + '\0' + info.path, path: info.path };
-        }
+          type = 'write'; identity = { key: (info.path.startsWith('/') ? '' : info.cwd) + '\0' + info.path };
+        } else if (!safeRead(block) && ERROR_SIGNAL.test(block.body)) continue;
         if (!identity) continue;
         const key = type + '\0' + identity.key;
-        const list = groups.get(key) || []; list.push({ block, path: identity.path, type }); groups.set(key, list);
+        const list = groups.get(key) || []; list.push(block); groups.set(key, list);
       }
-      const stubEdits = new Map(edits); let stubBytes = bytes, count = 0;
+      const stubEdits = new Map(edits), reservedIds = new Set();
+      for (const match of raw.matchAll(/arex-stubs-output-(\d+)/g)) reservedIds.add(match[1]);
+      let stubBytes = bytes, count = 0, nextStubId = 1;
       for (const entries of groups.values()) {
         if (entries.length < 2) continue;
-        const latest = entries.at(-1).block;
-        if (!safeRead(latest) && ERROR_SIGNAL.test(latest.body) && latest.label !== 'command') continue;
-        for (const { block, path, type } of entries.slice(0, -1)) {
-          if (!safeRead(block) && ERROR_SIGNAL.test(block.body) && block.label !== 'command') continue;
+        const seeds = new Map();
+        for (const block of entries) {
           const current = stubEdits.get(block)?.body ?? block.body;
           const lines = current.split('\n');
-          if (utf8Bytes(current) < 800 && lines.length < 25) continue;
-          const body = lines.slice(0, 4).concat('[... compact stub: earlier ' + (type === 'write' ? 'write' : 'read') + ' of ' + path + ' superseded by a later ' + (type === 'write' ? 'write' : 'read') + '; ' + Math.max(0, lines.length - 4) + ' lines omitted ...]').join('\n');
-          if (utf8Bytes(body) >= utf8Bytes(current)) continue;
-          stubBytes += setEdit(stubEdits, block, { ...stubEdits.get(block), body }); count++;
+          const pieces = []; let i = 0, used = new Set();
+          while (i < lines.length) {
+            // Bounded fingerprints are always verified with exact line equality.
+            const key = lines.slice(i, i + 4).join('\n');
+            const candidates = !stubEdits.get(block)?.anchor && i + 4 <= lines.length && key.length <= 2048 ? seeds.get(key) : null;
+            let best = null;
+            for (const source of candidates || []) {
+              let n = 0;
+              while (n < 4096 && i + n < lines.length && source.pos + n < source.lines.length &&
+                     lines[i + n] === source.lines[source.pos + n]) n++;
+              if (!best || n > best.n) best = { ...source, n };
+            }
+            if (best && best.n >= 5) {
+              const marker = '[... identical to lines ' + (best.pos + 1) + '–' + (best.pos + best.n) +
+                ' of earlier output #arex-stubs-output-' + best.id + ' ...]';
+              const original = lines.slice(i, i + best.n).join('\n');
+              if (utf8Bytes(original) >= utf8Bytes(marker) + 100) {
+                pieces.push(marker); used.add(best); i += best.n; continue;
+              }
+            }
+            pieces.push(lines[i++]);
+          }
+          const replacement = pieces.join('\n');
+          if (used.size && utf8Bytes(replacement) < utf8Bytes(current)) {
+            // Charge each newly inserted anchor before deciding to keep the edit.
+            const trial = new Map(stubEdits); let delta = 0;
+            for (const source of used) {
+              const previous = trial.get(source.block) || {};
+              if (!previous.stubAnchor)
+                delta += setEdit(trial, source.block, { ...previous, stubAnchor: source.id });
+            }
+            delta += setEdit(trial, block, { ...trial.get(block), body: replacement });
+            if (delta < 0) { stubEdits.clear(); for (const [k, v] of trial) stubEdits.set(k, v); stubBytes += delta; count++; continue; }
+          }
+          // Only unchanged blocks become sources, preventing reference chains
+          // and ensuring line numbers remain valid even after later edits.
+          while (reservedIds.has(String(nextStubId))) nextStubId++;
+          const id = nextStubId++;
+          for (let pos = 0; pos + 4 <= lines.length; pos++) {
+            const key = lines.slice(pos, pos + 4).join('\n');
+            if (key.length > 2048) continue;
+            const values = seeds.get(key);
+            if (!values && seeds.size >= 20000) continue;
+            const slots = values || [];
+            if (slots.length < 4) slots.push({ block, id, lines, pos });
+            seeds.set(key, slots);
+          }
         }
       }
       if (stubBytes <= bytes) { edits = stubEdits; bytes = stubBytes; stats.stubbed = count; }

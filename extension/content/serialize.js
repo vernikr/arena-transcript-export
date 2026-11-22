@@ -33,7 +33,8 @@ window.AREX = window.AREX || {};
 
   const isItemWrapper = el => {
     if (el.tagName !== 'DIV') return false;
-    for (const child of el.children) if (child.matches(S.EXPANDABLE)) return true;
+    for (let child = el.firstElementChild; child; child = child.nextElementSibling)
+      if (child.matches(S.EXPANDABLE)) return true;
     return false;
   };
 
@@ -42,9 +43,13 @@ window.AREX = window.AREX || {};
   function fileChip(el) {
     let chip = null;
     if (el.matches?.(S.FILE_CHIP)) chip = el;
-    else if (el.children?.length && el.children.length <= 3) {
-      const candidate = [...el.children].find(c => c.matches?.(S.FILE_CHIP));
-      if (candidate && !q(S.EXPANDABLE, el)) chip = candidate;
+    else {
+      let candidate = null, count = 0;
+      for (let child = el.firstElementChild; child && count <= 3; child = child.nextElementSibling) {
+        count++;
+        if (!candidate && child.matches(S.FILE_CHIP)) candidate = child;
+      }
+      if (count <= 3 && candidate && !q(S.EXPANDABLE, el)) chip = candidate;
     }
     if (!chip) return null;
     const spans = qq('span', chip).filter(span => {
@@ -69,7 +74,7 @@ window.AREX = window.AREX || {};
       if (n.nodeType === 3) return { plain: n.nodeValue, spaced: n.nodeValue };
       if (n.nodeType !== 1) return { plain: '', spaced: '' };
       const plain = [], spaced = [];
-      for (const child of n.childNodes) {
+      for (let child = n.firstChild; child; child = child.nextSibling) {
         if (child.nodeType === 1) {
           const tag = child.tagName.toLowerCase();
           if (tag === 'div' || tag === 'button' || tag === 'pre') { blocked = true; return { plain: '', spaced: '' }; }
@@ -157,8 +162,11 @@ window.AREX = window.AREX || {};
       if (isItemWrapper(el)) {
         if (opts.includeToolActivity !== false) {
           const head = AREX.headerText(el) || 'details';
-          const panel = [...el.children].find(c => c.matches?.(S.PANEL)) || null;
-          const collapsed = [...el.children].some(c => c.matches?.(S.COLLAPSED));
+          let panel = null, collapsed = false;
+          for (let child = el.firstElementChild; child; child = child.nextElementSibling) {
+            if (!panel && child.matches(S.PANEL)) panel = child;
+            if (!collapsed && child.matches(S.COLLAPSED)) collapsed = true;
+          }
           const nested = [heading(level, head)];
           if (panel) yield* walkSteps(panel, level + 1, nested, opts, footers, labels);
           else if (collapsed) nested.push('_(not expanded)_');
@@ -178,9 +186,9 @@ window.AREX = window.AREX || {};
       if (el.matches?.(S.FILE_CHIP)) { const line = renderPlainChip(el); if (line) out.push(line); return; }
       const leaf = leafText(el);
       if (leaf !== null) { if (leaf) out.push('- ' + leaf); return; }
-      for (const c of el.children || []) yield* walk(c);
+      for (let child = el.firstElementChild; child; child = child.nextElementSibling) yield* walk(child);
     }
-    for (const c of root.children || []) yield* walk(c);
+    for (let child = root.firstElementChild; child; child = child.nextElementSibling) yield* walk(child);
   }
 
   function msgTimestamp(m) {
