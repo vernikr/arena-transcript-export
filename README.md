@@ -19,9 +19,9 @@ Then open an agent branch on `https://arena.ai/agent/…`, click the extension i
 **Export branch to Markdown**.
 
 The scan runs in the Arena tab, so you can close the popup at any time. Reopen it from the
-extension icon while the same Arena tab is still open: the popup reconnects to the active scan,
-restores its progress, and receives the finished preview. The completed snapshot is then saved to
-extension IndexedDB as usual. Keep the Arena tab open until the scan finishes; reloading or closing
+extension icon while the same Arena tab is still open: the popup reconnects to the active scan
+and restores its progress. The background worker saves the completed snapshot to extension
+IndexedDB even while the popup is closed. Keep the Arena tab open until the scan finishes; reloading or closing
 that tab stops the in-tab task.
 
 ## Options
@@ -49,11 +49,15 @@ filesystem allocation overhead.
 
 The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
 progress log. Reopening the popup during a scan reconnects to the task and replays retained
-progress events; the content script keeps the completed result until the popup confirms that it
-has been saved to IndexedDB. The log includes history paging (rounds/pages/message counts), spoiler expansion passes
+progress events; the content script keeps the completed result until the background worker confirms
+that it has been saved to IndexedDB. The log includes history paging (rounds/pages/message counts), spoiler expansion passes
 (opened counters), cleanup of exporter-opened panels, and the assembled Markdown size. The final
 line lists messages, expanded spoilers and any warnings. Token counts are estimates intended for
 comparison, not an exact model-specific tokenizer result.
+
+The toolbar icon shows activity and stage progress during a scan. A green ✓ means an export
+finished while the popup was closed; a red ! signals an error. Hover for details and open the
+popup to clear these notifications. With multiple jobs, active scans take priority on the icon.
 
 ## Releases
 

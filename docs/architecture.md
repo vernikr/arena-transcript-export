@@ -15,7 +15,8 @@ Dev-only dep: jsdom (unit tests against a saved transcript fixture).
 extension/
   manifest.json            MV3: content scripts on https://arena.ai/agent/*, perms downloads+storage+scripting
   popup/popup.html|.js      UI: persistent preview, compression modes, progress, download/retake
-  popup/result-store.js    IndexedDB persistence for the latest raw Markdown snapshot
+  background.js            export coordinator, IndexedDB persistence and toolbar indicator
+  shared/result-store.js   IndexedDB persistence for the latest raw Markdown snapshot
   content/selectors.js     AREX.S — all DOM queries in one place (page churn containment)
   content/util.js          sleep, settle (MutationObserver quiet window), text extraction, slug
   content/loader.js        1️⃣ history gate: force-load earlier pages via scroll-to-top
@@ -102,11 +103,11 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
 - The latest raw snapshot is persisted in extension IndexedDB, outside the popup's short-lived
   JavaScript memory. Reopening the popup restores it; the user can download again or retake it.
 - The content script owns the task and retains up to 500 progress events plus the completed
-  result in the Arena tab memory. Closing the popup disconnects only the UI port; it does not cancel
-  the task. A reopened popup requests status, replays retained progress, and receives the result if
-  the scan has completed.
-- The content script keeps the raw result until the popup confirms a successful write to extension
-  IndexedDB. If persistence fails, the result remains available for a later popup session.
+  result in the Arena tab memory until the background worker saves it. Closing the popup disconnects
+  only the UI port; it does not cancel the task. A reopened popup requests status, replays retained
+  progress, and loads the saved snapshot if the scan has completed.
+- The content script keeps the raw result until the background worker confirms a successful write to
+  extension IndexedDB. If persistence fails, the result remains available for a later popup session.
 
 ## Delivery & UX details
 
@@ -128,6 +129,11 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
   correct icon is restored on service-worker restart/browser startup. Manifest `icons`
   (management page, not runtime-adaptable) use a neutral `#80868b` set readable on any card
   theme. Sources live as themed SVGs in `extension/icons/`.
+- The toolbar indicator renders cached theme-specific PNGs with `OffscreenCanvas` for active,
+  completed and failed jobs. It uses a single 180 ms timer only while at least one job is running;
+  running takes precedence over unseen errors and successes. Terminal notifications are persisted
+  in session storage and cleared on popup open. Badge text and title show stage/counters; known
+  percentages are shown when available, while history uses an indeterminate spinner.
 - Distribution: git tag `v*` → `release.yml` zips `extension/` and uploads
   `arena-transcript-export-<tag>.zip` to the GitHub Release (`--clobber`); `ci.yml` runs
   `npm test` on every push. Users install the release zip as an unpacked extension.
@@ -139,7 +145,7 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
 | Tailwind class churn (`prose`, `max-w-3xl`, card colors) | depend on stable data/aria hooks only; classes used solely within fixture-tested heuristics with fallbacks |
 | Arena adds DOM windowing later | abort if message count shrinks mid-run; research shows none today |
 | Unknown activity block types (plans, diffs, reasoning variants) | generic fallbacks: labeled-card, any-`pre`, text-row; headers are free-text |
-| Huge branches (RAM, message-size limits) | expansion is still needed for hidden content; process in batches, then close exporter-opened panels immediately after serialization; save the raw snapshot in IndexedDB after popup receives it |
+| Huge branches (RAM, message-size limits) | expansion is still needed for hidden content; process in batches, then close exporter-opened panels immediately after serialization; the background worker saves the raw snapshot in IndexedDB |
 | Popup closes during scan | task survives while the Arena tab remains open; popup reconnects and restores progress/result; closing or reloading the Arena tab ends the task |
 | i18n of "Loading earlier messages" | status text is matched explicitly; keep it aligned with the active Arena locale |
 

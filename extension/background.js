@@ -1,20 +1,3 @@
-// Theme-adaptive toolbar icon. MV3 service workers have no matchMedia, so the theme is probed
-// by window contexts (content script on arena.ai pages, popup on open) and bridged here via
-// runtime messages + chrome.storage.local (the cached value also survives browser restarts).
-const SETS = {
-  light: { 16: 'icons/icon16.png', 32: 'icons/icon32.png', 48: 'icons/icon48.png', 128: 'icons/icon128.png' },
-  dark: { 16: 'icons/icon16-dark.png', 32: 'icons/icon32-dark.png', 48: 'icons/icon48-dark.png', 128: 'icons/icon128-dark.png' },
-};
-const apply = theme =>
-  chrome.action.setIcon({ path: SETS[theme === 'dark' ? 'dark' : 'light'] }).catch(() => { });
-
-chrome.runtime.onMessage.addListener(m => { if (m?.arexTheme) apply(m.arexTheme); });
-chrome.storage.onChanged.addListener((c, area) => { if (area === 'local' && c.theme) apply(c.theme.newValue); });
-const restore = () => chrome.storage.local.get('theme').then(v => v.theme && apply(v.theme));
-chrome.runtime.onStartup.addListener(restore);
-chrome.runtime.onInstalled.addListener(restore);
-restore();
-
 // ---------------------------------------------------------------------------
 // Background coordinator for transcript exports.
 //
@@ -55,6 +38,9 @@ const listenerPorts = new Set();
 /** tabId -> Port (AREX_JOB) */
 const jobPortsByTab = new Map();
 let persistTimer = null;
+/** All open popups, including those which have not sent AREX_HELLO yet. */
+const openPopups = new Set();
+
 
 const now = () => Date.now();
 const newJob = tabId => ({
@@ -67,6 +53,7 @@ const newJob = tabId => ({
   startedAt: now(),
   updatedAt: now(),
   resultMeta: null,
+  unseen: false,
   // In-memory-only fallback when the IndexedDB write fails. Never persisted.
   pendingResult: null,
 });
@@ -83,6 +70,7 @@ function publicJob(job) {
     startedAt: job.startedAt,
     updatedAt: job.updatedAt,
     resultMeta: job.resultMeta,
+    unseen: Boolean(job.unseen),
     hasInMemoryResult: Boolean(job.pendingResult),
   };
 }
@@ -141,6 +129,7 @@ async function restoreJobs() {
       // cannot re-attach, so surface the loss instead of an endless spinner.
       job.status = 'error';
       job.error = 'Lost contact with the Arena tab (browser restart). Start the export again.';
+      job.unseen = !openPopups.size;
     }
     // Never clobber a live job that connected while the restore was in flight.
     if (!jobsByTab.has(job.tabId)) jobsByTab.set(job.tabId, job);
@@ -163,14 +152,18 @@ function noteProgress(job, event) {
   job.updatedAt = now();
   emitToPopups(job.tabId, { type: 'AREX_PROGRESS', tabId: job.tabId, ...event });
   persistJobs();
+  updateIndicator();
 }
 
 function setJobStatus(job, status, extra = {}) {
   job.status = status;
   Object.assign(job, extra);
+  job.unseen = (status === 'done' || status === 'error') && !openPopups.size &&
+    !(status === 'error' && /^Export cancelled\.?$/i.test(job.error || ''));
   job.updatedAt = now();
   broadcastStatus(job);
   persistJobs({ immediate: true });
+  updateIndicator();
 }
 
 const postSafe = (port, message) => {
@@ -236,6 +229,7 @@ function handleJobMessage(job, msg, port) {
       job.sourceUrl = msg.sourceUrl || null;
       job.status = 'running';
       job.error = null;
+      job.unseen = false;
       job.startedAt = msg.startedAt || now();
       job.resultMeta = null;
       job.pendingResult = null;
@@ -246,6 +240,7 @@ function handleJobMessage(job, msg, port) {
       job.updatedAt = now();
       broadcastStatus(job);
       persistJobs({ immediate: true });
+      updateIndicator();
       return;
     }
     case 'AREX_PROGRESS':
@@ -301,6 +296,14 @@ chrome.runtime.onConnect.addListener(port => {
   }
 
   if (port.name === 'AREX_POPUP') {
+    openPopups.add(port);
+    // Opening the popup acknowledges all notifications represented by the global icon.
+    void restored.then(() => {
+      if (!openPopups.has(port)) return;
+      for (const job of jobsByTab.values()) job.unseen = false;
+      persistJobs({ immediate: true });
+      updateIndicator();
+    });
     let subscribedTabId = null;
     port.onMessage.addListener(async msg => {
       if (!msg || typeof msg !== 'object') return;
@@ -350,7 +353,7 @@ chrome.runtime.onConnect.addListener(port => {
         case 'AREX_POPUP_OPENED': {
           // User looked at the final state: clear "done" visibility markers.
           const job = typeof tabId === 'number' ? jobsByTab.get(tabId) : null;
-          if (job && job.status === 'done') persistJobs();
+          if (job) { job.unseen = false; persistJobs({ immediate: true }); updateIndicator(); }
           return;
         }
         default:
@@ -364,6 +367,7 @@ chrome.runtime.onConnect.addListener(port => {
         if (set && !set.size) popupPortsByTab.delete(subscribedTabId);
       }
       listenerPorts.delete(port);
+      openPopups.delete(port);
     });
     return;
   }
@@ -411,6 +415,7 @@ async function startExportInTab(tabId, options) {
   capJobs();
   broadcastStatus(fresh);
   persistJobs({ immediate: true });
+  updateIndicator();
   try {
     chrome.tabs.sendMessage(tabId, { type: 'AREX_EXPORT_START', options }, () => void chrome.runtime.lastError);
   } catch (error) {
@@ -454,8 +459,160 @@ if (chrome.tabs?.onUpdated) {
   });
 }
 
+// --- Global toolbar indicator -----------------------------------------------
+// A global action reflects all tabs: running jobs take precedence, then the
+// newest unseen error/success. A single timer and a coalescing async renderer
+// prevent overlapping setIcon calls and stale frames after a state/theme change.
+const ICON_SETS = {
+  light: { 16: 'icons/icon16.png', 32: 'icons/icon32.png', 48: 'icons/icon48.png', 128: 'icons/icon128.png' },
+  dark: { 16: 'icons/icon16-dark.png', 32: 'icons/icon32-dark.png', 48: 'icons/icon48-dark.png', 128: 'icons/icon128-dark.png' },
+};
+const DEFAULT_TITLE = 'Export Arena transcript to Markdown';
+const iconBitmaps = new Map();
+let indicatorTheme = 'light';
+let themeRevision = 0;
+let indicatorTimer = null;
+let indicatorFrame = 0;
+let renderRevision = 0;
+let rendering = false;
+
+function indicatorState() {
+  const jobs = [...jobsByTab.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+  const running = jobs.find(job => job.status === 'running');
+  if (running) return { kind: 'running', job: running };
+  const error = jobs.find(job => job.status === 'error' && job.unseen);
+  if (error) return { kind: 'error', job: error };
+  const done = jobs.find(job => job.status === 'done' && job.unseen);
+  return done ? { kind: 'done', job: done } : { kind: 'idle' };
+}
+
+function progressDetails(job) {
+  const event = [...job.progress].reverse().find(p => p.stage && !['cancel', 'done'].includes(p.stage)) || {};
+  const counts = Number.isFinite(event.processedMessages) && Number.isFinite(event.totalMessages) && event.totalMessages > 0
+    ? ` (${event.processedMessages}/${event.totalMessages} msgs)` : '';
+  let percent = Number.isFinite(event.percent) ? Math.max(0, Math.min(100, Math.round(event.percent))) : null;
+  if (percent === null && counts) percent = Math.max(0, Math.min(100, Math.round(event.processedMessages / event.totalMessages * 100)));
+  if (event.stage === 'history') return { badge: event.pages ? `p${event.pages}` : '1/3', percent: null, title: `Loading history${Number.isFinite(event.loaded) ? `: ${event.loaded} msgs` : ''}…` };
+  if (event.stage === 'process') return { badge: percent === null ? '2/3' : `${percent}%`, percent, title: `Scanning${percent === null ? '' : ` ${percent}%`}${counts}…` };
+  if (event.stage === 'expand') return { badge: '45%', percent: 45, title: `Opening spoilers${Number.isFinite(event.expanded) ? `: ${event.expanded} opened` : ''}…` };
+  if (event.stage === 'serialize') return { badge: '75%', percent: 75, title: 'Converting Markdown…' };
+  if (event.stage === 'cleanup') return { badge: '90%', percent: 90, title: `Cleaning up${Number.isFinite(event.closed) && Number.isFinite(event.total) ? ` (${event.closed}/${event.total})` : ''}…` };
+  if (event.stage === 'saving') return { badge: '99%', percent: 99, title: 'Saving snapshot…' };
+  return { badge: '1/3', percent: null, title: 'Starting export…' };
+}
+
+function byteLabel(bytes) {
+  if (!Number.isFinite(bytes)) return '';
+  if (bytes < 1000) return `${bytes} B`;
+  if (bytes < 1000000) return `${(bytes / 1000).toFixed(1)} KB`;
+  return `${(bytes / 1000000).toFixed(2)} MB`;
+}
+
+function bitmapFor(theme, size) {
+  const path = ICON_SETS[theme][size];
+  if (!iconBitmaps.has(path)) {
+    const promise = fetch(chrome.runtime.getURL(path)).then(response => {
+      if (!response.ok) throw new Error(`Icon fetch failed: ${path}`);
+      return response.blob();
+    }).then(blob => createImageBitmap(blob));
+    iconBitmaps.set(path, promise);
+    promise.catch(() => iconBitmaps.delete(path));
+  }
+  return iconBitmaps.get(path);
+}
+
+async function drawIcon(state, theme, frame) {
+  const entries = await Promise.all([16, 32].map(async size => {
+    const bitmap = await bitmapFor(theme, size);
+    const canvas = new OffscreenCanvas(size, size);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0, size, size);
+    const x = size * 0.74, y = size * 0.74, radius = size * 0.20;
+    ctx.beginPath(); ctx.arc(x, y, radius + size * 0.045, 0, Math.PI * 2);
+    ctx.fillStyle = theme === 'dark' ? '#202124' : '#ffffff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, radius * 0.72, 0, Math.PI * 2);
+    if (state.kind !== 'running') {
+      ctx.fillStyle = state.kind === 'done' ? '#188038' : '#d93025'; ctx.fill();
+    } else {
+      ctx.strokeStyle = theme === 'dark' ? '#8ab4f8' : '#1a73e8';
+      ctx.lineWidth = Math.max(1.5, size * 0.09); ctx.globalAlpha = 0.24; ctx.stroke();
+      ctx.globalAlpha = 1; ctx.beginPath();
+      const percent = progressDetails(state.job).percent;
+      const start = -Math.PI / 2 + (percent === null ? frame * Math.PI / 5 : 0);
+      ctx.arc(x, y, radius * 0.72, start, start + (percent === null ? Math.PI * 1.2 : Math.max(0.05, percent / 100 * Math.PI * 2)));
+      ctx.lineCap = 'round'; ctx.stroke();
+    }
+    return [size, ctx.getImageData(0, 0, size, size)];
+  }));
+  return Object.fromEntries(entries);
+}
+
+async function renderIndicator(revision) {
+  const state = indicatorState(), theme = indicatorTheme, frame = indicatorFrame;
+  const detail = state.kind === 'running' ? progressDetails(state.job) : null;
+  const badge = detail?.badge || (state.kind === 'done' ? '✓' : state.kind === 'error' ? '!' : '');
+  const color = state.kind === 'done' ? '#188038' : state.kind === 'error' ? '#d93025' : '#1a73e8';
+  const bytes = state.kind === 'done' ? byteLabel(state.job.resultMeta?.bytes) : '';
+  const title = state.kind === 'idle' ? DEFAULT_TITLE : 'Arena Export — ' +
+    (detail?.title || (state.kind === 'done' ? `Ready to download${bytes ? ` (${bytes})` : ''}` : `Error: ${state.job.error || 'Export failed.'}`));
+  let icon = { path: ICON_SETS[theme] };
+  if (state.kind !== 'idle') {
+    try { icon = { imageData: await drawIcon(state, theme, frame) }; } catch { /* static icon + badge still works */ }
+  }
+  if (revision !== renderRevision) return;
+  // Calls are serialized, and the next render always follows any in-flight call.
+  try { await chrome.action.setIcon(icon); } catch { /* extension is shutting down */ }
+  if (revision !== renderRevision) return;
+  try { if (badge && chrome.action.setBadgeBackgroundColor) await chrome.action.setBadgeBackgroundColor({ color }); } catch { /* optional API */ }
+  if (revision !== renderRevision) return;
+  try { await chrome.action.setBadgeText({ text: badge }); } catch { /* extension is shutting down */ }
+  if (revision !== renderRevision) return;
+  try { await chrome.action.setTitle({ title }); } catch { /* extension is shutting down */ }
+}
+
+function requestIndicatorRender() {
+  renderRevision++;
+  if (rendering) return;
+  rendering = true;
+  void (async () => {
+    let revision;
+    do { revision = renderRevision; await renderIndicator(revision); } while (revision !== renderRevision);
+    rendering = false;
+  })();
+}
+
+function updateIndicator() {
+  const running = [...jobsByTab.values()].some(job => job.status === 'running');
+  if (running && !indicatorTimer) {
+    indicatorTimer = setInterval(() => { indicatorFrame++; requestIndicatorRender(); }, 180);
+    indicatorTimer?.unref?.(); // Node test harness only; browser timers are numeric.
+  } else if (!running && indicatorTimer) {
+    clearInterval(indicatorTimer); indicatorTimer = null;
+  }
+  requestIndicatorRender();
+}
+
+function setIndicatorTheme(theme) {
+  themeRevision++;
+  indicatorTheme = theme === 'dark' ? 'dark' : 'light';
+  updateIndicator();
+}
+chrome.runtime.onMessage.addListener(m => { if (m?.arexTheme) setIndicatorTheme(m.arexTheme); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.theme) setIndicatorTheme(changes.theme.newValue);
+});
+function restoreTheme() {
+  const revision = themeRevision;
+  return chrome.storage.local.get('theme').then(value => {
+    if (revision === themeRevision && value.theme) setIndicatorTheme(value.theme);
+  }).catch(() => {});
+}
+chrome.runtime.onStartup.addListener(restoreTheme);
+chrome.runtime.onInstalled.addListener(restoreTheme);
+void restoreTheme();
+
 // --- Boot ----------------------------------------------------------------------
 
-const restored = restoreJobs();
+const restored = restoreJobs().then(() => { updateIndicator(); });
 if (typeof chrome !== 'undefined' && chrome.runtime?.onStartup) chrome.runtime.onStartup.addListener(() => void restored);
 void restored;
