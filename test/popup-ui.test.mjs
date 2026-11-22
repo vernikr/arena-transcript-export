@@ -76,7 +76,7 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   const objectUrls = new Map();
   let nextObjectUrl = 0;
   chromeMock.tabs.sendMessage = (_tabId, _message, callback) =>
-    callback({ ok: true, compressionPreview: true, featureVersion: '0.2.9' });
+    callback({ ok: true, compressionPreview: true, featureVersion: '0.3.0' });
   chromeMock.tabs.connect = () => ({
     onDisconnect: { addListener() {} },
     onMessage: { addListener(listener) { onPortMessage = listener; } },
@@ -142,8 +142,10 @@ test('popup exposes compression modes, remembers selection, and disables them wi
     runScripts: 'outside-only',
   });
   reopened.window.matchMedia = () => ({ matches: false });
+  reopened.window.HTMLElement.prototype.scrollIntoView = function () {};
   reopened.window.TextEncoder = TextEncoder;
   let retakeStarted = false;
+  let resumedMessageHandler = null;
   const reopenedChrome = {
     storage: {
       local: { set() {} },
@@ -152,11 +154,11 @@ test('popup exposes compression modes, remembers selection, and disables them wi
     runtime: { sendMessage() { return Promise.resolve(); } },
     tabs: {
       async query() { return [{ id: 1, url: 'https://arena.ai/agent/test' }]; },
-      sendMessage(_tabId, _message, callback) { callback({ ok: true, compressionPreview: true, featureVersion: '0.2.9' }); },
+      sendMessage(_tabId, _message, callback) { callback({ ok: true, compressionPreview: true, featureVersion: '0.3.0' }); },
       connect() {
         return {
           onDisconnect: { addListener() {} },
-          onMessage: { addListener() {} },
+          onMessage: { addListener(listener) { resumedMessageHandler = listener; } },
           postMessage(message) { if (message.type === 'AREX_EXPORT_START') retakeStarted = true; },
         };
       },
@@ -182,6 +184,17 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   const retakeDeadline = Date.now() + 1000;
   while (!retakeStarted && Date.now() < retakeDeadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.equal(retakeStarted, true);
+
+  // Reopening during an active scan replays its current stage and disables conflicting actions.
+  resumedMessageHandler({
+    type: 'AREX_STATUS',
+    status: 'running',
+    progress: [{ stage: 'history', phase: 'page', pages: 3, loaded: 60 }],
+  });
+  assert.equal(r$('#progress').hidden, false);
+  assert.equal(r$('#export').disabled, true);
+  assert.match(r$('#log').textContent, /3 earlier page/);
+  assert.match(r$('#status').textContent, /scan continued in the Arena tab/);
 
   reopened.window.close();
 });

@@ -106,17 +106,32 @@ async function ensurePort(tabId) {
     catch { fin(null); }
     setTimeout(() => fin(null), 800);
   });
-  if (readiness?.ok && readiness.featureVersion !== '0.2.9') {
+  if (readiness?.ok && readiness.featureVersion !== '0.3.0') {
     throw new Error('Reload this Arena tab once to activate the updated export extension.');
   }
   if (!readiness?.ok) await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
   port = chrome.tabs.connect(tabId, { name: 'AREX' });
   port.onDisconnect.addListener(() => { port = null; });
   port.onMessage.addListener(msg => {
+    if (msg.type === 'AREX_STATUS') onRemoteStatus(msg);
     if (msg.type === 'AREX_PROGRESS') onProgress(msg);
     if (msg.type === 'AREX_RESULT') onResult(msg);
   });
   return port;
+}
+
+function onRemoteStatus(message) {
+  for (const event of message.progress || []) onProgress(event);
+  if (['running', 'done', 'error'].includes(message.status)) progress.hidden = false;
+  if (message.status !== 'running') return;
+
+  preparing = true;
+  btn.disabled = true;
+  resnapshotBtn.disabled = true;
+  btn.textContent = 'Scanning…';
+  setPreparationControlsDisabled(true);
+  progress.hidden = false;
+  say('The scan continued in the Arena tab. Live progress is restored below.');
 }
 
 /* ----- staged progress log ----- */
@@ -225,11 +240,17 @@ async function onResult(message) {
     createdAt: Date.now(),
   };
   let storageWarning = '';
+  let snapshotStored = false;
   try {
     await AREX_RESULT_STORE.save(prepared);
+    snapshotStored = true;
   } catch (error) {
     storageWarning = '\n⚠ Could not save this preview for the next popup opening: ' +
       String(error?.message || error);
+  }
+  // Release the in-tab copy only after the durable popup-origin IndexedDB write succeeds.
+  if (snapshotStored) {
+    try { port?.postMessage({ type: 'AREX_RESULT_ACK' }); } catch { }
   }
 
   for (const stage of STAGE_ORDER) if (lines[stage]) setIcon(lines[stage], '✓', 'tick');
@@ -268,7 +289,7 @@ async function preparePreview() {
   progress.hidden = false;
   logEl.replaceChildren();
   for (const key in lines) delete lines[key];
-  say(prepared ? 'Taking a fresh snapshot. The previous preview remains available until this one is ready.' : '');
+  say(prepared ? 'Taking a fresh snapshot. The previous preview remains available until this one is ready.' : 'The scan continues in the Arena tab; you can close and reopen this popup.');
   try {
     const connection = await ensurePort(tab.id);
     connection.postMessage({
@@ -298,7 +319,6 @@ async function downloadPrepared() {
   const url = URL.createObjectURL(blob);
   try {
     await chrome.downloads.download({ url, filename: prepared.filename, saveAs: true });
-    port?.postMessage({ type: 'AREX_DOWNLOAD_ACK' });
     const savedFilename = prepared.filename;
     const { messages, expandedSpoilers } = prepared.stats;
     sizeValue.textContent = kb(blob.size);
@@ -356,6 +376,7 @@ async function restorePreviousSnapshot() {
     const snapshot = await AREX_RESULT_STORE.load();
     if (snapshot && typeof snapshot.markdown === 'string' && snapshot.filename) {
       prepared = snapshot;
+      progress.hidden = false;
       resnapshotBtn.hidden = false;
       resnapshotBtn.disabled = false;
       btn.textContent = 'Download Markdown';
@@ -379,4 +400,21 @@ async function restorePreviousSnapshot() {
   }
 }
 
-void restorePreviousSnapshot();
+async function reconnectToCurrentExport() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !/^https:\/\/arena\.ai\/agent\//.test(tab.url || '')) return;
+    const connection = await ensurePort(tab.id);
+    connection.postMessage({ type: 'AREX_GET_STATUS' });
+  } catch (error) {
+    const warning = 'Could not reconnect to the current Arena scan: ' + String(error?.message || error);
+    say(prepared ? status.textContent + '\n⚠ ' + warning : warning, 'warn');
+  }
+}
+
+async function initializePopup() {
+  await restorePreviousSnapshot();
+  await reconnectToCurrentExport();
+}
+
+void initializePopup();

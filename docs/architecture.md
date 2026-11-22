@@ -23,7 +23,7 @@ extension/
   content/markdown.js      HTML → Markdown (block-level recursive)
   content/serialize.js     3️⃣ message walk: roles, activity items, code cards → md
   content/compress.js      deterministic Lossless/Smart/Stubs transforms + UTF-8/token metrics
-  content/main.js          orchestrator + runtime message API (EXPORT_START/PING, PROGRESS)
+  content/main.js          tab-resident orchestrator + reconnectable status/result API
 ```
 
 Content scripts run in the isolated world and only touch the DOM; no `page JS` access needed.
@@ -101,20 +101,24 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
 - A monotonicity guard falls back to raw Markdown if a selected transform would increase file size.
 - The latest raw snapshot is persisted in extension IndexedDB, outside the popup's short-lived
   JavaScript memory. Reopening the popup restores it; the user can download again or retake it.
-- If the popup closes during an in-flight export, the content script retains an in-page raw-download
-  fallback.
+- The content script owns the task and retains up to 500 progress events plus the completed
+  result in the Arena tab memory. Closing the popup disconnects only the UI port; it does not cancel
+  the task. A reopened popup requests status, replays retained progress, and receives the result if
+  the scan has completed.
+- The content script keeps the raw result until the popup confirms a successful write to extension
+  IndexedDB. If persistence fails, the result remains available for a later popup session.
 
 ## Delivery & UX details
 
-- Popup keeps the run alive; result string → popup creates blob URL →
+- The Arena tab keeps the run alive independently of the popup; result string → popup creates blob URL →
   `chrome.downloads.download({ saveAs: true })`, filename
   `arena-<slug(branch title|uuid)>-<YYYYMMDD-HHmm>.md`.
-- If the popup closed mid-run, the content script falls back to an in-page `<a download>` click.
 - The popup follows `prefers-color-scheme` with native-Chrome tokens and renders a staged
   progress log (`ul#log`): one line per stage (history / expand / serialize / cleanup), spinner → ✓,
   granular counters from pipeline events (history pages and message counts, per-pass spoiler
   counts, final markdown bytes) and an ok/warn summary. Options persist via `chrome.storage.sync`.
-- Progress is emitted by every pipeline stage over the port (`AREX_PROGRESS`); the loader reports
+- Progress is emitted by every pipeline stage over the port and retained in the tab; reconnecting
+  popups receive a status snapshot plus the retained event list. The loader reports
   scan/page(+delta)/loading/settle/retry phases so the first (history) stage never sits silently.
 - Export is allowed while the agent is generating. The file contains the DOM state read during serialization; later generated content requires another export.
 - Toolbar icon is theme-adaptive: Lucide `file-down` glyph (stroke `#5f6368` light / `#c7c7c7`
@@ -135,7 +139,8 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
 | Tailwind class churn (`prose`, `max-w-3xl`, card colors) | depend on stable data/aria hooks only; classes used solely within fixture-tested heuristics with fallbacks |
 | Arena adds DOM windowing later | abort if message count shrinks mid-run; research shows none today |
 | Unknown activity block types (plans, diffs, reasoning variants) | generic fallbacks: labeled-card, any-`pre`, text-row; headers are free-text |
-| Huge branches (RAM, message-size limits) | expansion is still needed for hidden content; process in batches, then close exporter-opened panels immediately after serialization; keep the raw snapshot in IndexedDB between popup opens |
+| Huge branches (RAM, message-size limits) | expansion is still needed for hidden content; process in batches, then close exporter-opened panels immediately after serialization; save the raw snapshot in IndexedDB after popup receives it |
+| Popup closes during scan | task survives while the Arena tab remains open; popup reconnects and restores progress/result; closing or reloading the Arena tab ends the task |
 | i18n of "Loading earlier messages" | status text is matched explicitly; keep it aligned with the active Arena locale |
 
 ## Testing
@@ -143,4 +148,5 @@ it does not revisit the Arena DOM or repeat history paging / spoiler expansion.
 `npm test` (node:test + jsdom): markdown converter cases; serializer over the saved transcript
 fixture (546 KB, 9 messages) asserting message order/roles, fences, exclusion of sidebar/panel
 artifacts; loader/expander loops against synthetic DOMs that emulate Arena's mount-on-click and
-prepend-on-scroll behavior with fake timers.
+prepend-on-scroll behavior with fake timers; popup-port reconnect tests cover scan continuation,
+progress replay, result delivery and acknowledgement.

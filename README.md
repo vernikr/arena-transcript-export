@@ -18,8 +18,11 @@ folder.
 Then open an agent branch on `https://arena.ai/agent/…`, click the extension icon →
 **Export branch to Markdown**.
 
-Keep the popup open while it works (long branches take a while: history paging + spoiler passes).
-If you close it mid-run, the file is still delivered via an in-page download fallback.
+The scan runs in the Arena tab, so you can close the popup at any time. Reopen it from the
+extension icon while the same Arena tab is still open: the popup reconnects to the active scan,
+restores its progress, and receives the finished preview. The completed snapshot is then saved to
+extension IndexedDB as usual. Keep the Arena tab open until the scan finishes; reloading or closing
+that tab stops the in-tab task.
 
 ## Options
 
@@ -45,10 +48,12 @@ The size card shows exact UTF-8 bytes plus decimal MB; Finder's separate “size
 filesystem allocation overhead.
 
 The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
-progress log: history paging (rounds/pages/message counts), spoiler expansion passes
+progress log. Reopening the popup during a scan reconnects to the task and replays retained
+progress events; the content script keeps the completed result until the popup confirms that it
+has been saved to IndexedDB. The log includes history paging (rounds/pages/message counts), spoiler expansion passes
 (opened counters), cleanup of exporter-opened panels, and the assembled Markdown size. The final
-line lists messages, expanded spoilers and any warnings. Token counts are estimates intended for comparison, not an exact
-model-specific tokenizer result.
+line lists messages, expanded spoilers and any warnings. Token counts are estimates intended for
+comparison, not an exact model-specific tokenizer result.
 
 ## Releases
 
