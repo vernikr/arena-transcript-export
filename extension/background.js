@@ -20,8 +20,15 @@ const RESULT_STORE = globalThis.AREX_RESULT_STORE || null;
 
 const CONTENT_FILES = [
   'content/selectors.js', 'content/util.js', 'content/markdown.js', 'content/serialize.js',
-  'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/main.js',
+  'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/profile.js', 'content/main.js',
 ];
+
+// Bounded shape check for the profile artifact: a small structured log, not the markdown.
+function isValidProfile(profile) {
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return false;
+  if (profile.profileVersion !== 1) return false;
+  try { return JSON.stringify(profile).length <= 256 * 1024; } catch { return false; }
+}
 const CONTENT_FEATURE_VERSION = '0.4.1';
 const MAX_TRACKED_JOBS = 30;
 const PROGRESS_CAP = 500;
@@ -219,6 +226,12 @@ async function finalizeResult(job, endMessage) {
   if (RESULT_STORE) {
     try {
       await RESULT_STORE.save(snapshot);
+      // The profiling record is best-effort: keep the snapshot primary and ACK
+      // even if saving the profile fails.
+      try {
+        if (isValidProfile(endMessage?.profile)) await RESULT_STORE.saveProfile(endMessage.profile);
+        else await RESULT_STORE.clearProfile();
+      } catch { /* profile unavailable; snapshot is still saved */ }
       setJobStatus(job, 'done', { error: null });
       postSafe(jobPortsByTab.get(job.tabId), { type: 'AREX_RESULT_ACK' });
       return;
@@ -235,7 +248,7 @@ async function finalizeResult(job, endMessage) {
 
 // --- AREX_JOB port (content script -> background) ---------------------------
 
-function handleJobMessage(job, msg, port) {
+async function handleJobMessage(job, msg, port) {
   if (!msg || typeof msg !== 'object') return;
   switch (msg.type) {
     case 'AREX_JOB_START': {
@@ -291,6 +304,11 @@ function handleJobMessage(job, msg, port) {
       if (job.status !== 'running' || job.finalizing) return;
       if (msg.ok === false) {
         job.pendingResult = null;
+        // Persist the profile from a failed/cancelled run so the popup can show it.
+        if (isValidProfile(msg.profile) && RESULT_STORE?.saveProfile) {
+          // Best-effort; the failure itself must not wait on persistence.
+          try { await RESULT_STORE.saveProfile(msg.profile); } catch { /* best effort */ }
+        }
         setJobStatus(job, 'error', { error: msg.error || 'Export failed.' });
         return;
       }

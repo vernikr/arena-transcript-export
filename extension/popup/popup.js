@@ -16,6 +16,10 @@ const resnapshotBtn = $('#resnapshot');
 const sizeExactValue = $('#sizeExactValue');
 const optActivity = $('#includeToolActivity');
 const optTimestamps = $('#timestamps');
+const optProfile = $('#profileOpt');
+const profileCard = $('#profileCard');
+const profileSummary = $('#profileSummary');
+const profileDownload = $('#profileDownload');
 const optCompress = $('#compressHistory');
 const compression = $('#compression');
 const modeButtons = [...document.querySelectorAll('.mode')];
@@ -44,6 +48,7 @@ const kb = n => AREX.formatBytes(n);
 
 let port = null;
 let prepared = null;
+let profileDoc = null;
 let preparing = false;
 let downloading = false;
 let activeMode = 'lossless';
@@ -60,9 +65,11 @@ chrome.storage.sync.get({
   timestamps: false,
   compressHistory: true,
   compressionMode: 'lossless',
+  profile: true,
 }, options => {
   optActivity.checked = options.includeToolActivity;
   optTimestamps.checked = options.timestamps;
+  optProfile.checked = options.profile !== false;
   optCompress.checked = options.compressHistory;
   activeMode = ['lossless', 'smart', 'stubs'].includes(options.compressionMode)
     ? options.compressionMode : 'lossless';
@@ -76,6 +83,7 @@ function persistOptions() {
     timestamps: optTimestamps.checked,
     compressHistory: optCompress.checked,
     compressionMode: activeMode,
+    profile: optProfile.checked,
   });
 }
 
@@ -247,12 +255,72 @@ function onProgress(message) {
   }
 }
 
+async function loadProfile() {
+  const store = globalThis.AREX_RESULT_STORE;
+  const loader = store && typeof store.loadProfile === 'function' ? store.loadProfile.bind(store) : null;
+  if (!loader) return null;
+  try {
+    const value = await loader();
+    return value && typeof value === 'object' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatProfileDuration(ms) {
+  if (ms == null || Number.isNaN(ms)) return null;
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + ' s' : Math.round(ms) + ' ms';
+}
+
+function profileSummaryLines(profile) {
+  const totals = profile.totals || {};
+  const head = [];
+  const duration = formatProfileDuration(profile.durationMs);
+  if (duration) head.push('Total ' + duration);
+  if (totals.messages != null) head.push(totals.messages + ' messages');
+  if (totals.expandedSpoilers != null) head.push(totals.expandedSpoilers + ' spoilers');
+  if (totals.markdownBytes != null) head.push(AREX.formatBytes(totals.markdownBytes));
+  head.push('outcome ' + (profile.outcome || 'unknown'));
+  const lines = [head.join(' · ')];
+  const phases = Object.entries(profile.phases || {}).map(([name, rec]) => name + ' ' + Math.round(Number(rec.ms) || 0) + ' ms');
+  if (phases.length) lines.push(phases.join(' · '));
+  const windows = Array.isArray(profile.windows) ? profile.windows : [];
+  const timing = profile.messageTiming || {};
+  const slowest = windows[0];
+  const details = [];
+  if (slowest) details.push('Slowest window #' + slowest.index + ' (' + Math.round(Number(slowest.ms) || 0) + ' ms' + (slowest.messages != null ? ' · ' + slowest.messages + ' msg' : '') + ')');
+  if (timing.count) details.push('p95 ' + Math.round(timing.p95Ms || 0) + ' ms · max ' + Math.round(timing.maxMs || 0) + ' ms');
+  if (details.length) lines.push(details.join(' · '));
+  return lines.join('\n');
+}
+
+function renderProfile(profile) {
+  profileDoc = profile || null;
+  profileCard.hidden = !profile;
+  if (!profile) { profileSummary.textContent = ''; return; }
+  profileSummary.textContent = profileSummaryLines(profile);
+}
+
+async function downloadProfile() {
+  if (!profileDoc) return;
+  const base = (prepared?.filename || profileDoc.chatUuid || 'arena').replace(/\.md$/i, '');
+  const blob = new Blob([JSON.stringify(profileDoc, null, 2)], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  try {
+    await chrome.downloads.download({ url, filename: base + '-profile.json', saveAs: true });
+  } catch (error) {
+    say(String(error?.message || error), 'error');
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+}
+
 async function snapshotFromStore() {
   const snapshot = await AREX_RESULT_STORE.load();
   return snapshot && typeof snapshot.markdown === 'string' && snapshot.filename ? snapshot : null;
 }
 
-async function prepareFromSnapshot(snapshot, { restored = false, warning = '' } = {}) {
+async function prepareFromSnapshot(snapshot, { restored = false, warning = '', showProfile = true } = {}) {
   prepared = snapshot;
   initializeCompression(snapshot);
   resnapshotBtn.hidden = false;
@@ -260,6 +328,8 @@ async function prepareFromSnapshot(snapshot, { restored = false, warning = '' } 
   btn.textContent = 'Download Markdown';
   setPreparationControlsDisabled(true);
   renderSizePreview();
+  if (showProfile) renderProfile(await loadProfile());
+  else { profileDoc = null; renderProfile(null); }
   const warnings = prepared.warnings?.length ? '\n⚠ ' + prepared.warnings.join('\n⚠ ') : '';
   if (restored) {
     const when = snapshot.createdAt ? new Date(snapshot.createdAt).toLocaleString() : 'previous session';
@@ -307,7 +377,7 @@ function onInMemoryResult(message) {
     stats: message.stats || { messages: 0, expandedSpoilers: 0 },
     warnings: message.warnings || [],
     createdAt: Date.now(),
-  }, { warning: '⚠ Could not save the snapshot to browser storage — download it now before closing the popup.' });
+  }, { warning: '⚠ Could not save the snapshot to browser storage — download it now before closing the popup.', showProfile: false });
 }
 
 async function onBackgroundStatus(job) {
@@ -337,6 +407,7 @@ async function onBackgroundStatus(job) {
     if (prepared) renderSizePreview();
     say(job.error || 'Export failed.', 'error');
     markStagesFailed();
+    renderProfile(await loadProfile());
     if (job.hasInMemoryResult && !prepared) postToBackground({ type: 'AREX_GET_INMEMORY_RESULT', tabId: currentTabId });
     return;
   }
@@ -452,6 +523,8 @@ async function renderSizePreview() {
 async function preparePreview() {
   if (preparing) return;
   preparing = true;
+  profileDoc = null;
+  renderProfile(null);
   btn.disabled = true;
   resnapshotBtn.disabled = true;
   btn.textContent = 'Preparing history…';
@@ -495,6 +568,7 @@ async function preparePreview() {
     options: {
       includeToolActivity: optActivity.checked,
       timestamps: optTimestamps.checked,
+      profile: optProfile.checked,
     },
   });
 }
@@ -566,6 +640,12 @@ resnapshotBtn.addEventListener('click', () => {
   updateCompressionControls();
   if (prepared) renderSizePreview();
 }));
+optProfile.addEventListener('change', () => {
+  persistOptions();
+});
+profileDownload.addEventListener('click', () => {
+  void downloadProfile();
+});
 modeButtons.forEach(button => button.addEventListener('click', () => {
   activeMode = button.dataset.mode;
   persistOptions();

@@ -25,11 +25,25 @@ extension/
   content/markdown.js      HTML → Markdown (block-level recursive)
   content/serialize.js     3️⃣ zero-clone, cooperative message walk → Markdown
   content/compress.js      deterministic Lossless/Smart/Stubs transforms + UTF-8/token metrics
+  content/profile.js       bounded, zero-I/O profiling recorder for one export run
   content/main.js          tab-resident window pipeline + reconnectable status/result API
 ```
 
 Content scripts run in the isolated world and only touch the DOM; no `page JS` access needed.
 All scripts share one global namespace `AREX` (manifest load order = init order).
+
+## Profiling log
+
+`content/profile.js` records one bounded, JSON-serializable profile per export: phase timings
+(`history`, `expand`, `cleanup`, `process`), per-message timing aggregates (count, mean, p95, max,
+slowest message index), per-window records for the slowest windows only (capped, the rest is
+counted), Chromium heap samples (best-effort), a short milestone event list, and per-run totals.
+It performs no I/O or timers during the run — only `performance.now()` and small object pushes —
+and writes one JSON document at the end (hard-capped at 64 KiB), so it stays cheap on very large
+pages and the resulting log is easy for an agent to triage. Profiling is enabled by default; the
+popup's **Performance profiling** option disables it for the run (`options.profile: false`). The
+profile is persisted by the background worker next to the snapshot (`latest-profile`,
+`result-store.js`) and surfaced in the popup alongside the snapshot.
 
 ## Pipeline (per export request)
 
@@ -39,6 +53,7 @@ EXPORT_START → load history (sentinel + MutationObserver)
                   expand its spoilers → settle local DOM → serialize each message
                   → close only the spoilers opened by this export
              → background saves Markdown to IndexedDB → popup preview / download
+             → bounded profile document → IndexedDB → popup summary + JSON download
 ```
 
 1. **History gate** (`loader.js`). Scroll the Arena sentinel into view and observe mutations

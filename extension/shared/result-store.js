@@ -11,6 +11,7 @@
   // Tiny metadata record kept next to the full snapshot so the UI can show
   // "what is stored" without reading a multi-megabyte markdown string.
   const META_KEY = 'latest-meta';
+  const PROFILE_KEY = 'latest-profile';
   let databasePromise = null;
 
   function openDatabase() {
@@ -72,6 +73,7 @@
       const store = transaction.objectStore(STORE_NAME);
       store.delete(KEY);
       store.delete(META_KEY);
+      store.delete(PROFILE_KEY);
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error || new Error('Could not delete the saved transcript.'));
       transaction.onabort = () => reject(transaction.error || new Error('Saved transcript transaction was aborted.'));
@@ -99,6 +101,17 @@
   }
 
   root.AREX_RESULT_STORE = {
+    // Persistent profile record attached to the latest snapshot.
+    loadProfile: () => requestValue('readonly', 'get', PROFILE_KEY).then(value => (value && typeof value === 'object' ? value : null)),
+    async saveProfile(profile) {
+      if (!profile || typeof profile !== 'object') throw new Error('Profile must be an object.');
+      const record = { ...profile };
+      if (!Number.isInteger(record.profileVersion)) record.profileVersion = 1;
+      await requestValue('readwrite', 'put', { data: record, key: PROFILE_KEY });
+      return record;
+    },
+    clearProfile: () => requestValue('readwrite', 'delete', PROFILE_KEY),
+
     load: () => requestValue('readonly', 'get', KEY),
     async loadMeta() {
       const meta = await requestValue('readonly', 'get', META_KEY);

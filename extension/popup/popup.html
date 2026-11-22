@@ -120,6 +120,12 @@
     transition: width .35s ease;
   }
 
+  #profileCard { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--track); }
+  #profileCard[hidden] { display: none; }
+  #profileSummary { color: var(--secondary); font-size: 11px; line-height: 16px; white-space: pre-wrap; font-variant-numeric: tabular-nums; }
+  #profileDownload { min-height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--fg); font: inherit; font-size: 11.5px; cursor: pointer; align-self: flex-start; }
+  #profileDownload:hover { background: var(--bg); }
+
   #progress { margin-top: 10px; }
   ul#log {
     margin: 0; padding: 6px 8px; list-style: none; max-height: 168px; overflow-y: auto;
@@ -162,6 +168,9 @@
   <label class="opt"><input type="checkbox" id="timestamps">
     <span><b>Message timestamps</b>
     <small>Add the visible message time to each heading.</small></span></label>
+  <label class="opt"><input type="checkbox" id="profileOpt" checked>
+    <span><b>Performance profiling</b>
+    <small>Detailed timing of the export; saved with the snapshot.</small></span></label>
 
   <section id="compression">
     <label class="opt"><input type="checkbox" id="compressHistory" checked>
@@ -191,6 +200,10 @@
       <div id="sizeValue">—</div>
       <div id="savedValue"></div>
     </div>
+  </section>
+  <section id="profileCard" hidden aria-live="polite">
+    <div id="profileSummary"></div>
+    <button id="profileDownload" type="button">Download profile (JSON)</button>
   </section>
   <section id="progress" hidden><ul id="log"></ul><div id="status"></div></section>
   <script src="../content/compress.js"></script>

@@ -29,9 +29,11 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   };
   window.chrome = chromeMock;
   let lastSavedSnapshot = null;
+  let profileDoc = null;
   window.AREX_RESULT_STORE = {
     async load() { return lastSavedSnapshot; },
     async save(snapshot) { lastSavedSnapshot = { ...snapshot }; },
+    async loadProfile() { return profileDoc; },
   };
 
   const context = dom.getInternalVMContext();
@@ -40,6 +42,7 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   }
 
   const $ = selector => window.document.querySelector(selector);
+  const profileSummaryEmpty = $ => !$('#profileSummary').textContent.trim();
   const lossless = $('[data-mode="lossless"]');
   const smart = $('[data-mode="smart"]');
   const stubs = $('[data-mode="stubs"]');
@@ -82,6 +85,26 @@ test('popup exposes compression modes, remembers selection, and disables them wi
     onMessage: { addListener(listener) { onPortMessage = listener; } },
     postMessage(message) {
       if (message.type === 'AREX_EXPORT_START') {
+        profileDoc = {
+          profileVersion: 1,
+          tool: 'arena-transcript-export',
+          toolVersion: '0.4.1',
+          sourceUrl: 'https://arena.ai/agent/test',
+          chatUuid: 'test',
+          startedAt: new Date().toISOString(),
+          durationMs: 1834.2,
+          outcome: 'done',
+          error: null,
+          options: { includeToolActivity: true, timestamps: false, profile: true },
+          totals: { messages: 4, windows: 1, expandedSpoilers: 3, markdownBytes: 20480, spoilersStuck: 0, spoilersTotal: 3, leftCollapsed: 0 },
+          phases: { history: { ms: 210, count: 1, maxMs: 210 }, expand: { ms: 700, count: 1, maxMs: 700 }, cleanup: { ms: 120, count: 1, maxMs: 120 } },
+          messageTiming: { count: 4, meanMs: 30.5, p95Ms: 42.1, maxMs: 50.2, maxMessageIndex: 2, maxWindowIndex: 0, samplesKept: 4, samplesCapped: false },
+          windows: [{ index: 0, from: 0, to: 4, messages: 4, spoilers: 3, ms: 900, expandMs: 700, serializeMs: 120, cleanupMs: 60, bytes: 20480 }],
+          windowsOmitted: 0,
+          memory: [],
+          events: [{ tMs: 0, phase: 'export.start' }, { tMs: 1834.2, phase: 'export.done' }],
+          eventsDropped: 0,
+        };
         const passed = Array.from({ length: 12 }, (_, i) => '✓ suite > test-' + i + ' [1.00ms]').join('\n');
         const markdown = '**stdout:**\n\n' + String.fromCharCode(96).repeat(3) +
           'text\n' + passed + '\n' + String.fromCharCode(96).repeat(3);
@@ -139,8 +162,36 @@ test('popup exposes compression modes, remembers selection, and disables them wi
   assert.equal($('#sizePreview').hidden, false);
   assert.match($('#savedValue').textContent, /from/);
 
+  // The profile card is populated from the persisted profile record.
+  const profileCard = $('#profileCard');
+  const profileDownload = $('#profileDownload');
+  const profileDeadline = Date.now() + 1500;
+  while (!profileCard.hidden && profileSummaryEmpty($) && Date.now() < profileDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(profileCard.hidden, false);
+  const profileTextBefore = $('#profileSummary').textContent;
+  assert.match(profileTextBefore, /Total 1.8 s/);
+  assert.match(profileTextBefore, /4 messages/);
+  assert.match(profileTextBefore, /3 spoilers/);
+  assert.match(profileTextBefore, /done/);
+  assert.match(profileTextBefore, /history 210 ms/);
+  assert.match(profileTextBefore, /expand 700 ms/);
+  assert.match(profileTextBefore, /Slowest window #0/);
+  assert.match(profileTextBefore, /p95 42 ms/);
+
+  profileDownload.click();
+  while ((!downloadedFilename || !downloadedText || !downloadedFilename.endsWith('-profile.json')) && Date.now() < deadline + 1500) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(downloadedFilename, 'arena-preview-test-profile.json');
+  assert.match(downloadedText, /"profileVersion": 1/);
+  assert.match(downloadedText, /"durationMs": 1834.2/);
+
+  downloadedFilename = '';
+  downloadedText = '';
   $('[id="export"]').click();
-  while ((!downloadedFilename || !downloadedText) && Date.now() < deadline + 1500) {
+  while ((!downloadedFilename || !downloadedText) && Date.now() < deadline + 3000) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   assert.equal(downloadedFilename, 'arena-preview-test.md');

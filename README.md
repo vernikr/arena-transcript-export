@@ -29,6 +29,13 @@ that tab stops the in-tab task.
 - **Expand & include tool activity** (default on) — click-open every spoiler and export its
   content as headed sections with fenced code. Off = prose only (fast).
 - **Message timestamps** (default off) — append the visible message time to each heading.
+- **Performance profiling** (default on) — a bounded, zero-I/O profiling record of the export is
+  written to the tab and saved in IndexedDB next to the snapshot. It includes per-phase timings
+  (history, expand, cleanup, process), per-message timing aggregates (count/mean/p95/max), the
+  slowest windows, Chromium heap samples and a short milestone event list. It stays cheap even on
+  very large pages (the document is hard-capped at 64 KiB) and is produced only for the run; nothing
+  is logged during the export itself. The popup shows a compact summary and offers a
+  **Download profile (JSON)** button. Disable it to keep a run free of profiling overhead.
 - **Compress history** (default on) — choose one of three deterministic modes:
   - **Lossless** — exact duplicate tool outputs are kept once; repeated blocks link to the original.
   - **Smart** — Lossless plus ANSI/progress-noise removal, collapsing long consecutive passing-test
@@ -45,7 +52,7 @@ Compression and token estimates run in a background Web Worker; switching modes 
 cache after the first calculation. **Download Markdown** saves the selected prepared result without
 recompressing it or loading the Arena history again. The selected mode and options are remembered.
 
-The latest prepared snapshot is saved in extension IndexedDB. Reopening the popup restores its size
+The latest prepared snapshot and its profiling record are saved in extension IndexedDB. Reopening the popup restores its size
 preview and lets you download it again or choose **Retake snapshot** to capture the current branch.
 The size card shows exact UTF-8 bytes plus decimal MB; Finder's separate “size on disk” value includes
 filesystem allocation overhead.

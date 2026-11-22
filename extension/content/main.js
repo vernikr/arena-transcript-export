@@ -15,6 +15,7 @@ AREX._job = {
   progress: [],
   result: null,
   error: null,
+  profile: null,
   startedAt: null,
   updatedAt: null,
 };
@@ -53,6 +54,7 @@ function ensureJobPort() {
     if (msg?.type === 'AREX_RESULT_ACK') {
       // Background durably stored the snapshot and the tab can release its copy.
       AREX._job.result = null;
+      AREX._job.profile = null;
       if (AREX._jobReconnectTimer) clearTimeout(AREX._jobReconnectTimer);
       AREX._jobReconnectTimer = null;
       AREX._job.status = 'saved';
@@ -88,7 +90,8 @@ function scheduleJobReconnect() {
     if (!started) { scheduleJobReconnect(); return; }
     if (AREX._job.result && !sendPendingResult()) scheduleJobReconnect();
     else if (AREX._job.status === 'error' && !AREX._job.errorDelivered) {
-      AREX._job.errorDelivered = postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error });
+      AREX._job.errorDelivered = postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error,
+        ...(AREX._job.profile ? { profile: AREX._job.profile } : {}) });
       if (!AREX._job.errorDelivered) scheduleJobReconnect();
     }
   }, 1000);
@@ -106,7 +109,8 @@ function sendPendingResult() {
     if (!data && seq === 0) break;
   }
   return postJob({ type: 'AREX_RESULT_END', ok: true, filename: result.filename, stats: result.stats,
-    warnings: result.warnings, bytes: AREX._job.resultBytes, createdAt: AREX._job.resultCreatedAt });
+    warnings: result.warnings, bytes: AREX._job.resultBytes, createdAt: AREX._job.resultCreatedAt,
+    ...(AREX._job.profile ? { profile: AREX._job.profile } : {}) });
 }
 
 function startHeartbeat() {
@@ -124,12 +128,13 @@ function stopHeartbeat() {
 // Expand, serialize and release just a few messages at a time. The shared
 // openedButtons array is populated at click time so cancellation/errors during
 // expansion still restore every control opened by this export.
-AREX.processMessagesInWindows = async function (log, options = {}, { onProgress, onCleanup, windowSize = 4 } = {}) {
+AREX.processMessagesInWindows = async function (log, options = {}, { onProgress, onCleanup, windowSize = 4, profiler = null } = {}) {
+  const perf = profiler && profiler.enabled ? profiler : null;
   const messages = AREX.messages(log);
   const totalMessages = messages.length;
   const parts = [AREX.serializeHeader(totalMessages)];
   const includeToolActivity = options.includeToolActivity !== false;
-  let expandedSpoilers = 0, assembledBytes = new TextEncoder().encode(parts[0]).length, leftCollapsed = 0;
+  let expandedSpoilers = 0, assembledBytes = new TextEncoder().encode(parts[0]).length, leftCollapsed = 0, stuckSpoilers = 0;
   // Count visible collapsed spoilers up front, then add nested spoilers as their
   // parent panels mount. Each message and each spoiler is one unit of work.
   let totalSpoilers = includeToolActivity
@@ -166,8 +171,14 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
     let newlyDiscoveredSpoilers = 0;
     let spoilersCounted = false;
     let processedInWindow = 0;
+    const windowIndex = Math.floor(start / Math.max(1, windowSize));
+    const windowStartMs = perf ? perf.now() : 0;
+    const windowBytesStart = assembledBytes;
+    const windowExpandedStart = expandedSpoilers;
+    let expandMs = 0, serializeMs = 0, cleanupMs = 0;
     try {
       if (includeToolActivity) {
+        const expandStartMs = perf ? perf.now() : 0;
         const expand = await AREX.expandAllSpoilers(log, {
           roots, openedButtons, cooperative: true,
           settleOptions: { quietMs: 100, maxMs: 1500, attributes: false },
@@ -181,6 +192,11 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
               percent: progressPercent(start, completedSpoilers, knownSpoilers) });
           },
         });
+        if (perf) {
+          expandMs = perf.now() - expandStartMs;
+          perf.phase('expand', expandMs, `${expand.expanded || 0} spoiler(s)`);
+        }
+        stuckSpoilers += (expand.stuck && expand.stuck.length) || 0;
         // Allows compatible callers that return their own array; the built-in
         // expander normally appends to the shared array as it clicks.
         if (expand.openedButtons && expand.openedButtons !== openedButtons)
@@ -194,8 +210,11 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
       }
       AREX.throwIfAborted?.();
       verifyMessages();
+      const serializeStartMs = perf ? perf.now() : 0;
       for (let i = 0; i < roots.length; i++) {
+        const messageStartMs = perf ? perf.now() : 0;
         const segment = await AREX.serializeMessageAsync(roots[i], options);
+        if (perf) perf.message(perf.now() - messageStartMs, start + i, windowIndex);
         parts.push(segment);
         assembledBytes += 2 + new TextEncoder().encode(segment).length;
         processedInWindow = i + 1;
@@ -203,6 +222,7 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
         onProgress?.({ stage: 'process', processedMessages, totalMessages, expandedSpoilers, totalSpoilers, assembledBytes,
           percent: progressPercent(processedMessages, expandedSpoilers) });
       }
+      if (perf) serializeMs = perf.now() - serializeStartMs;
     } finally {
       if (includeToolActivity && !spoilersCounted) {
         newlyDiscoveredSpoilers = Math.max(newlyDiscoveredSpoilers,
@@ -212,19 +232,41 @@ AREX.processMessagesInWindows = async function (log, options = {}, { onProgress,
       if (openedButtons.length) {
         // Cleanup must finish even when progress reporting or serialization
         // throws, and must not be interrupted by the cancellation signal.
+        const cleanupStartMs = perf ? perf.now() : 0;
         await AREX.collapseOpenedSpoilers(openedButtons, { roots, cooperative: true, onProgress: event => onCleanup?.({
           stage: 'process', phase: 'cleanup', processedMessages: start + processedInWindow,
           totalMessages, expandedSpoilers, totalSpoilers, assembledBytes,
           percent: progressPercent(start + processedInWindow, expandedSpoilers),
           closed: event.closed, total: event.total,
         }) });
+        if (perf) {
+          cleanupMs = perf.now() - cleanupStartMs;
+          perf.phase('cleanup', cleanupMs);
+        }
       }
+    }
+    if (perf) {
+      perf.window({
+        index: windowIndex, from: start, to: start + roots.length, messages: roots.length,
+        spoilers: expandedSpoilers - windowExpandedStart,
+        ms: perf.now() - windowStartMs,
+        expandMs, serializeMs, cleanupMs,
+        bytes: assembledBytes - windowBytesStart,
+      });
     }
     verifyMessages();
     if (start + roots.length < totalMessages) await AREX.yieldToMain();
   }
   AREX.throwIfAborted?.();
-  return { markdown: parts.join('\n\n') + '\n', expandedSpoilers, leftCollapsed, totalMessages };
+  return {
+    markdown: parts.join('\n\n') + '\n',
+    expandedSpoilers,
+    leftCollapsed,
+    totalMessages,
+    totalSpoilers,
+    stuckSpoilers,
+    windowCount: totalMessages > 0 ? Math.floor((totalMessages - 1) / Math.max(1, windowSize)) + 1 : 0,
+  };
 };
 
 AREX.runExport = async function (options = {}) {
@@ -239,9 +281,21 @@ AREX.runExport = async function (options = {}) {
     progress: [],
     result: null,
     error: null,
+    profile: null,
     startedAt: Date.now(),
     updatedAt: Date.now(),
   };
+  // A bounded, zero-I/O profiler for this export. Enabled by default; the popup
+  // passes options.profile = false to keep the run free of profiling overhead.
+  const profiler = AREX.createProfiler({
+    enabled: options.profile !== false,
+    toolVersion: '0.4.1',
+    sourceUrl: location.href,
+    chatUuid: AREX.chatUuid?.() || null,
+    options,
+  });
+  profiler.event('export.start');
+  profiler.sampleMemory('export.start');
   ensureJobPort();
   const announced = postJob({
     type: 'AREX_JOB_START',
@@ -275,10 +329,19 @@ AREX.runExport = async function (options = {}) {
     const found = await AREX.waitFor(() => AREX.logEl(), { timeoutMs: 15000 });
     if (!found) throw new Error('Transcript not found. Open an Arena agent conversation page and retry.');
     const log = AREX.logEl();
+    const historyStartMs = profiler.now();
     const hist = await AREX.loadFullHistory(log, { onProgress: progress });
-    const processed = await AREX.processMessagesInWindows(log, options, { onProgress: progress, onCleanup: progressBestEffort });
+    const historyMs = profiler.now() - historyStartMs;
+    profiler.phase('history', historyMs, `${hist.pages} earlier page(s) · ${hist.messages} message(s) · stable=${hist.stable ? 'yes' : 'no'}`);
+    profiler.event('history.done', `${hist.pages} pages · ${hist.messages} messages · stable=${hist.stable ? 'yes' : 'no'}`);
+    profiler.sampleMemory('history.done');
+    const processStartMs = profiler.now();
+    const processed = await AREX.processMessagesInWindows(log, options, { onProgress: progress, onCleanup: progressBestEffort, profiler });
+    profiler.phase('process', profiler.now() - processStartMs);
+    profiler.event('process.done', `${processed.totalMessages} messages · ${processed.expandedSpoilers} spoilers · ${processed.windowCount} window(s)`);
     const { markdown, expandedSpoilers, leftCollapsed, totalMessages } = processed;
     const bytes = new TextEncoder().encode(markdown).length;
+    profiler.event('serialize.assembled', `${bytes} byte(s)`);
     progress({ stage: 'serialize', phase: 'done', bytes });
 
     const warnings = [];
@@ -291,6 +354,24 @@ AREX.runExport = async function (options = {}) {
       stats: { messages: totalMessages, expandedSpoilers },
       warnings,
     };
+    profiler.event('export.done', `done · ${bytes} bytes`);
+    AREX._job.profile = profiler.finish({
+      outcome: 'done',
+      warnings,
+      totals: {
+        messages: totalMessages,
+        windows: processed.windowCount,
+        expandedSpoilers,
+        spoilersStuck: processed.stuckSpoilers,
+        spoilersTotal: processed.totalSpoilers,
+        leftCollapsed,
+        historyPages: hist.pages,
+        historyStable: hist.stable,
+        historyMessages: hist.messages,
+        markdownChars: markdown.length,
+        markdownBytes: bytes,
+      },
+    });
     progress({ stage: 'done', ...result.stats, warnings });
     // Keep the raw result in the tab until the background coordinator confirms
     // it was persisted to IndexedDB (AREX_RESULT_ACK).
@@ -307,7 +388,15 @@ AREX.runExport = async function (options = {}) {
     AREX._job.status = 'error';
     AREX._job.error = cancelled ? 'Export cancelled.' : String(error?.message || error);
     AREX._job.updatedAt = Date.now();
-    AREX._job.errorDelivered = postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error });
+    profiler.event(cancelled ? 'export.cancelled' : 'export.error', AREX._job.error);
+    AREX._job.profile = profiler.finish({
+      outcome: cancelled ? 'cancelled' : 'error',
+      error: AREX._job.error,
+      warnings: [],
+      totals: {},
+    });
+    AREX._job.errorDelivered = postJob({ type: 'AREX_RESULT_END', ok: false, error: AREX._job.error,
+      ...(AREX._job.profile ? { profile: AREX._job.profile } : {}) });
     if (!AREX._job.errorDelivered) scheduleJobReconnect();
     throw error;
   } finally {

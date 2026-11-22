@@ -36,6 +36,7 @@
         "content/loader.js",
         "content/expand.js",
         "content/compress.js",
+        "content/profile.js",
         "content/main.js"
       ]
     }

@@ -43,7 +43,7 @@ function makeDom() {
 }
 
 function loadContentScripts(dom) {
-  for (const name of ['selectors.js', 'util.js', 'markdown.js', 'serialize.js', 'loader.js', 'expand.js', 'compress.js']) {
+  for (const name of ['selectors.js', 'util.js', 'markdown.js', 'serialize.js', 'loader.js', 'expand.js', 'compress.js', 'profile.js']) {
     vm.runInContext(source(name), dom.getInternalVMContext(), { filename: name });
   }
   vm.runInContext(source('main.js'), dom.getInternalVMContext(), { filename: 'main.js' });

@@ -3,7 +3,7 @@ import { JSDOM } from 'jsdom';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
-const FILES = ['selectors.js', 'util.js', 'markdown.js', 'serialize.js', 'loader.js', 'expand.js', 'compress.js', 'main.js'];
+const FILES = ['selectors.js', 'util.js', 'markdown.js', 'serialize.js', 'loader.js', 'expand.js', 'compress.js', 'profile.js', 'main.js'];
 
 export function makeEnv({ html = '<div role="log"></div>', url = 'https://arena.ai/agent/u-1' } = {}) {
   const dom = new JSDOM(`<!DOCTYPE html><html><body><main>${html}</main></body></html>`, {
