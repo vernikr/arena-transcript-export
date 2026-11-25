@@ -32,7 +32,7 @@ const CONTENT_FILES = [
   'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/profile.js', 'content/main.js',
 ];
 
-const CONTENT_FEATURE_VERSION = '0.4.1';
+const CONTENT_FEATURE_VERSION = '0.4.2';
 const MAX_TRACKED_JOBS = 30;
 const PROGRESS_CAP = 500;
 const SESSION_PROGRESS_CAP = 20;
