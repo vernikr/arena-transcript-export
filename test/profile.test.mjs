@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { makeEnv } from './harness.mjs';
 
 const opts = { includeToolActivity: true, timestamps: false };
+const fromWindow = value => JSON.parse(JSON.stringify(value));
 
 function env(html = '<div role="log"></div>') {
   return makeEnv({ html, url: 'https://arena.ai/agent/u-1' });
@@ -17,6 +18,13 @@ test('disabled profiler is a no-op throughout', () => {
   profiler.window({ index: 0, ms: 5 });
   profiler.message(1, 0, 0);
   profiler.sampleMemory('x');
+  assert.equal(profiler.now(), 0);
+  const token = profiler.beginSpan('x', { windowIndex: 0 });
+  assert.equal(token, null);
+  profiler.setCursor({ stage: 'process' });
+  profiler.sampleYield();
+  profiler.endSpan(token, { finished: true });
+  assert.equal(profiler.snapshot({ outcome: 'cancelling' }), null);
   assert.equal(profiler.finish({ outcome: 'done' }), null);
 });
 
@@ -76,15 +84,19 @@ test('finish produces a bounded, machine-readable document', () => {
   assert.ok(json.length < 4096, 'doc should stay compact');
 });
 
-test('event and window lists stay bounded and keep the slowest windows', () => {
+test('head and tail survive a 520-event run, and only the slowest windows are kept', () => {
   const { AREX } = env();
   const profiler = AREX.createProfiler({ toolVersion: '0.4.1', options: opts });
-  for (let i = 0; i < 100; i++) profiler.event('phase-' + i, 'note');
+  for (let i = 0; i < 520; i++) profiler.event('phase-' + i, 'note');
   for (let i = 0; i < 200; i++) profiler.window({ index: i, from: i, to: i + 1, messages: 1, ms: i, expandMs: 1, serializeMs: 1, cleanupMs: 1, bytes: 10, spoilers: 0 });
   const doc = profiler.finish({ outcome: 'done', totals: { messages: 200, windows: 200 } });
 
-  assert.equal(doc.events.length, 48);
-  assert.equal(doc.eventsDropped, 52);
+  const expected = [...Array.from({ length: 16 }, (_, i) => `phase-${i}`),
+    ...Array.from({ length: 64 }, (_, i) => `phase-${456 + i}`)];
+  for (const profile of [profiler.snapshot(), doc]) {
+    assert.deepEqual(Array.from(profile.events, entry => entry.phase), expected);
+    assert.equal(profile.eventsDropped, 440);
+  }
   // 200 windows recorded, 64 kept — the slowest (highest ms) ones.
   assert.equal(doc.windows.length, 64);
   assert.equal(doc.windowsOmitted, 136);
@@ -92,14 +104,175 @@ test('event and window lists stay bounded and keep the slowest windows', () => {
   assert.equal(JSON.stringify(doc.windows.map(w => w.ms)), JSON.stringify(Array.from({ length: 64 }, (_, i) => 199 - i)));
 });
 
-test('the document stays inside a hard byte budget', () => {
+function timedEnv() {
+  const { AREX, window } = env();
+  let now = 0;
+  let memoryReads = 0;
+  Object.defineProperty(window.performance, 'now', { value: () => now });
+  Object.defineProperty(window.performance, 'memory', {
+    get() {
+      memoryReads++;
+      return { usedJSHeapSize: 100, totalJSHeapSize: 200, jsHeapSizeLimit: 1000 };
+    },
+  });
+  return { AREX, tick: ms => { now += ms; }, memoryReads: () => memoryReads };
+}
+
+test('live snapshots neither mutate the run nor share mutable data with it', () => {
+  const { AREX, tick, memoryReads } = timedEnv();
+  const live = AREX.createProfiler();
+  const control = AREX.createProfiler();
+  const profilers = [live, control];
+  for (const profiler of profilers) {
+    profiler.event('export.start');
+    profiler.phase('history', 10);
+    profiler.window({ index: 0, ms: 10 });
+    profiler.sampleMemory('history.done');
+  }
+  tick(10);
+  const detail = { batch: 2 };
+  const tokens = profilers.map(profiler => profiler.beginSpan('window', detail));
+  detail.batch = 99;
+  const progressLog = Array.from({ length: 90 }, (_, i) => ({ stage: 'process', at: i, percent: i, warnings: ['nested'] }));
+  tick(20);
+  const first = live.snapshot({ progressLog, warnings: ['warning'], partialStats: { messages: 3 } });
+  assert.equal(first.profileVersion, 2);
+  assert.equal(first.outcome, 'running');
+  assert.equal(first.inFlight.span.elapsedMs, 20);
+  assert.equal(first.inFlight.span.detail.batch, 2);
+  assert.equal(first.durationMs, 30);
+  assert.equal(first.phases.window, undefined);
+  assert.equal(first.phases.history.ms, 10);
+  assert.equal(first.totals.messages, 3);
+  assert.equal(first.partialStats.messages, 3);
+  assert.equal(first.totals.warnings[0], 'warning');
+  assert.equal(first.progressLog.length, 64);
+  assert.equal(first.progressLogOmitted, 26);
+  assert.deepEqual(fromWindow(first.progressLog.at(-1)), progressLog.at(-1));
+  first.events[0].phase = 'mutated';
+  first.windows[0].ms = 999;
+  first.memory[0].memory.usedJSHeapSizeBytes = 0;
+  first.inFlight.span.detail.batch = 999;
+  first.progressLog.at(-1).warnings[0] = 'changed';
+  assert.equal(progressLog.at(-1).warnings[0], 'nested');
+
+  tick(30);
+  const second = live.snapshot({ outcome: 'cancelling' });
+  assert.equal(second.outcome, 'cancelling');
+  assert.equal(second.inFlight.span.elapsedMs, 50);
+  assert.equal(second.inFlight.span.detail.batch, 2);
+  assert.equal(first.inFlight.span.elapsedMs, 20);
+  assert.equal(second.memory[0].memory.usedJSHeapSizeBytes, 100);
+  assert.equal(memoryReads(), 2, 'snapshot must not take a memory sample');
+
+  profilers.forEach((profiler, i) => {
+    profiler.endSpan(tokens[i], { messages: 4 });
+    profiler.endSpan(tokens[i]); // double end must not count twice
+    profiler.window({ index: 1, ms: 50 });
+    profiler.event('export.done');
+  });
+  tick(10);
+  const finished = live.finish();
+  const baseline = control.finish();
+  const { startedAt: ignored, ...result } = finished;
+  const { startedAt: alsoIgnored, ...expected } = baseline;
+  assert.deepEqual(result, expected);
+  assert.equal(finished.profileVersion, 1);
+  assert.equal(finished.durationMs, 70);
+  assert.equal(finished.phases.window.count, 1);
+  assert.deepEqual(JSON.parse(finished.phases.window.detail), { batch: 2, messages: 4 });
+  assert.equal(finished.memory.at(-1).phase, 'export.finished');
+  assert.equal(first.memory.length, 1);
+});
+
+test('a stuck expand pass reports its current cursor, not a completed phase', () => {
+  const { AREX, tick } = timedEnv();
+  const profiler = AREX.createProfiler();
+  const outer = profiler.beginSpan('window', { index: 29 });
+  tick(5);
+  const inner = profiler.beginSpan('expand', { limit: 30 });
+  profiler.setCursor({ stage: 'process', phase: 'expand', windowIndex: 29, messageIndex: 117 });
+  profiler.setCursor({ pass: 14, spoilersOpened: 5, spoilersClosed: 0 });
+  tick(900);
+  const stuck = profiler.snapshot();
+  assert.equal(stuck.phases.expand, undefined);
+  assert.equal(stuck.sinceLastYieldMs, 905);
+  assert.deepEqual(fromWindow(stuck.inFlight), {
+    span: { name: 'expand', startedAtMs: 5, elapsedMs: 900, detail: { limit: 30 } },
+    cursor: { stage: 'process', phase: 'expand', windowIndex: 29, messageIndex: 117, pass: 14, spoilersOpened: 5, spoilersClosed: 0 },
+  });
+  profiler.endSpan(inner);
+  profiler.setCursor({ phase: 'cleanup', pass: null });
+  const cleaning = profiler.snapshot();
+  assert.equal(cleaning.phases.expand.ms, 900);
+  assert.equal(cleaning.inFlight.span.name, 'window');
+  assert.equal(cleaning.inFlight.cursor.pass, undefined);
+  assert.equal(stuck.inFlight.cursor.phase, 'expand');
+  profiler.endSpan(outer);
+  profiler.setCursor(null);
+  for (const outcome of ['idle', 'cancelled_partial', 'error', 'done']) {
+    const doc = profiler.snapshot({ outcome });
+    assert.equal(doc.outcome, outcome);
+    assert.deepEqual(fromWindow(doc.inFlight), { span: null, cursor: null });
+  }
+});
+
+test('cooperative yield gaps count >250 ms and keep the eight longest gaps >100 ms', () => {
+  const { AREX, tick } = timedEnv();
+  const profiler = AREX.createProfiler();
+  const gaps = [100, 250, 251, 900, 101, 300, 320, 150, 400, 180, 120, 170];
+  for (const gap of gaps) {
+    profiler.setCursor({ pass: gap });
+    tick(gap);
+    profiler.sampleYield();
+  }
+  const doc = profiler.snapshot();
+  assert.equal(doc.longYields, 5);
+  assert.deepEqual(Array.from(doc.yieldStalls, stall => stall.gapMs), [900, 400, 320, 300, 251, 250, 180, 170]);
+  assert.equal(doc.yieldStalls[0].cursor.pass, 900);
+  tick(20);
+  assert.equal(profiler.snapshot().sinceLastYieldMs, 20);
+
+  const threshold = AREX.createProfiler();
+  tick(100);
+  threshold.sampleYield();
+  tick(101);
+  threshold.sampleYield();
+  assert.deepEqual(Array.from(threshold.snapshot().yieldStalls, stall => stall.gapMs), [101]);
+});
+
+const sizeOf = doc => Buffer.byteLength(JSON.stringify(doc), 'utf8');
+
+test('snapshot and finish enforce the UTF-8 byte budget, even below the full schema size', () => {
   const { AREX } = env();
-  const profiler = AREX.createProfiler({ toolVersion: '0.4.1', options: opts, maxJSONBytes: 2048 });
-  for (let i = 0; i < 300; i++) profiler.event('e-' + i, 'detail '.repeat(40));
-  for (let i = 0; i < 300; i++) profiler.message(1 + i / 100, i, Math.floor(i / 4));
-  for (let i = 0; i < 300; i++) profiler.window({ index: i, from: i * 4, to: i * 4 + 4, messages: 4, ms: 100 + i, expandMs: 1, serializeMs: 1, cleanupMs: 1, bytes: 100, spoilers: 1 });
-  const doc = profiler.finish({ outcome: 'done', totals: { messages: 300, windows: 300 } });
-  assert.ok(JSON.stringify(doc).length <= 2048, 'JSON budget exceeded');
+  assert.throws(() => AREX.createProfiler({ maxJSONBytes: 1 }), /maxJSONBytes/);
+  for (const budget of [2, 128, 2048, 256 * 1024]) {
+    const profiler = AREX.createProfiler({ maxJSONBytes: budget, sourceUrl: '🌐'.repeat(2048) });
+    const text = '界'.repeat(400);
+    profiler.beginSpan('cleanup', { note: text });
+    for (let i = 0; i < 300; i++) {
+      profiler.event('e-' + i, text);
+      profiler.phase('p-' + i, i, text);
+      profiler.window({ index: i, ms: i, note: text });
+    }
+    const limit = Math.min(budget, 128 * 1024);
+    const snapshot = profiler.snapshot({ progressLog: Array.from({ length: 100 }, (_, i) => ({ at: i, detail: text })), warnings: [text] });
+    const finish = profiler.finish({ warnings: [text] });
+    for (const doc of [snapshot, finish]) {
+      assert.ok(sizeOf(doc) <= limit, `JSON budget of ${limit} bytes exceeded`);
+      if (doc.events) {
+        assert.equal(doc.events.length + doc.eventsDropped, 300);
+        assert.equal(doc.windows.length + doc.windowsOmitted, 300);
+      }
+    }
+    if (budget > 128 * 1024) {
+      assert.equal(snapshot.profileVersion, 2);
+      assert.equal(snapshot.events.length, 80, 'drop bulky detail before losing milestones');
+      assert.equal(snapshot.events.at(-1).phase, 'e-299');
+      assert.equal(snapshot.progressLog.at(-1).at, 99);
+      assert.equal(snapshot.progressLog.length + snapshot.progressLogOmitted, 100);
+    }
+  }
 });
 
 test('window process records per-window stats and message timings', async () => {
