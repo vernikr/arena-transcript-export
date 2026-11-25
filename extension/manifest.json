@@ -36,6 +36,8 @@
         "content/serialize.js",
         "content/loader.js",
         "content/expand.js",
+        "content/compress-index.js",
+        "content/compress-framing.js",
         "content/compress.js",
         "content/profile.js",
         "content/main.js"

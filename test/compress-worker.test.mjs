@@ -13,7 +13,9 @@ const waitUntil = async (condition, ms = 1000) => {
 test('worker builds one index per snapshot and caches each mode', () => {
   const sent = [], sandbox = { TextEncoder, console, self: { postMessage: message => sent.push(message) } };
   vm.createContext(sandbox);
-  sandbox.importScripts = () => vm.runInContext(read('content/compress.js'), sandbox);
+  sandbox.importScripts = (...paths) => {
+    for (const path of paths) vm.runInContext(read(path.replace('../', '')), sandbox);
+  };
   vm.runInContext(read('popup/compress-worker.js'), sandbox);
   vm.runInContext(`globalThis.calls = { index: 0, compress: 0 }; const build = AREX.buildMarkdownIndex, compress = AREX.compressIndex;
     AREX.buildMarkdownIndex = (...args) => { calls.index++; return build(...args); };
@@ -123,7 +125,9 @@ test('popup ignores stale worker replies, caches modes and downloads the selecte
 test('GET_MODE with includeMarkdown:false omits markdown and GET_MARKDOWN returns it', () => {
   const sent = [], sandbox = { TextEncoder, console, self: { postMessage: message => sent.push(message) } };
   vm.createContext(sandbox);
-  sandbox.importScripts = () => vm.runInContext(read('content/compress.js'), sandbox);
+  sandbox.importScripts = (...paths) => {
+    for (const path of paths) vm.runInContext(read(path.replace('../', '')), sandbox);
+  };
   vm.runInContext(read('popup/compress-worker.js'), sandbox);
   const send = data => sandbox.self.onmessage({ data });
   const markdown = 'hello мир\n\n**stdout:**\n\n```text\n' + Array.from({ length: 30 }, (_, i) => 'same line ' + i).join('\n') + '\n```\n\n#### second\n\n**stdout:**\n\n```text\n' + Array.from({ length: 30 }, (_, i) => 'same line ' + i).join('\n') + '\n```';

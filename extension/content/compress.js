@@ -412,7 +412,18 @@ globalThis.AREX = globalThis.AREX || {};
       parts.push(raw.slice(last, block.startOffset), renderBlock(block, edit)); last = block.endOffset;
     }
     parts.push(raw.slice(last));
-    const markdown = parts.join(''), savedBytes = baseBytes - bytes;
+    let markdown = parts.join('');
+    if ((mode === 'smart' || mode === 'stubs') && AREX.compactFraming) {
+      // Run after output/Stubs edits so framing sees the final fences and
+      // anchors, never stale offsets or command sources referenced by Stubs.
+      const framing = AREX.compactFraming(AREX.buildDocumentIndex(markdown), { mode });
+      if (framing.byteDelta < 0) {
+        markdown = framing.markdown;
+        bytes = framing.bytes;
+        tokens = estimateTokens(markdown);
+      }
+    }
+    const savedBytes = baseBytes - bytes;
     return { markdown, bytes, baselineBytes: baseBytes, savedBytes, savedRatio: baseBytes ? savedBytes / baseBytes : 0, estimatedTokens: tokens, stats };
   }
 

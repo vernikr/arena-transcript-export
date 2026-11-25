@@ -1,5 +1,5 @@
 // One snapshot/index per popup worker. Mode results are cached for its lifetime.
-importScripts('../content/compress.js');
+importScripts('../content/compress-index.js', '../content/compress-framing.js', '../content/compress.js');
 let snapshotId = null, index = null, initError = null;
 const cache = new Map();
 self.onmessage = event => {

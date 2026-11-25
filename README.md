@@ -40,6 +40,9 @@ that tab stops the in-tab task.
   - **Lossless** — exact duplicate tool outputs are kept once; repeated blocks link to the original.
   - **Smart** — Lossless plus ANSI/progress-noise removal, collapsing long consecutive passing-test
     runs, and head/tail previews for very large clean command logs. Error output is retained.
+    Smart/Stubs also remove redundant single-Bash/empty-read headings and render short,
+    single-line shell commands as compact callouts without changing command text. Multiline,
+    backtick-containing and anchored commands keep their full fences; Off/Lossless keep raw framing.
   - **Stubs** — Smart plus references to identical consecutive lines already present in an
     earlier read or heredoc write of the same file. Unlike the former version, it does not
     discard different file versions or non-overlapping ranges merely because the path matches.
