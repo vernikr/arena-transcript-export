@@ -1,3 +1,6 @@
 node_modules/
 .DS_Store
 *.log
+
+# Local dev sentinel written by scripts/sync-extension.sh (never committed).
+extension/dev-version.txt

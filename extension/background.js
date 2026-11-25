@@ -19,6 +19,14 @@ if (typeof globalThis.AREX_RESULT_STORE === 'undefined' && typeof importScripts 
 }
 const RESULT_STORE = globalThis.AREX_RESULT_STORE || null;
 
+// Development convenience: reload this profile's extension when the checkout
+// changes (see dev-reload.js). No-ops outside a real service worker.
+if (typeof importScripts === 'function') {
+  try { importScripts('dev-reload.js'); } catch (error) {
+    console.error('[arex] failed to load dev reload', error);
+  }
+}
+
 const CONTENT_FILES = [
   'content/selectors.js', 'content/util.js', 'content/markdown.js', 'content/serialize.js',
   'content/loader.js', 'content/expand.js', 'content/compress.js', 'content/profile.js', 'content/main.js',
