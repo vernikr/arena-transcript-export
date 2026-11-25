@@ -10,20 +10,28 @@ function port(name, tabId) {
   return { name, sender: tabId == null ? undefined : { tab: { id: tabId } }, onMessage: event(), onDisconnect: event(), postMessage() {}, disconnect() { return this.onDisconnect.emit(); } };
 }
 function setup(session = {}) {
-  const intervals = new Map(), calls = [], requests = [];
+  const intervals = new Map(), calls = [], requests = [], rectDraws = [];
   let timerId = 0;
   const runtime = { onMessage: event(), onConnect: event(), onStartup: event(), onInstalled: event(), getURL: p => p };
   const changes = event();
+  const onUpdated = event();
   const action = Object.fromEntries(['setIcon', 'setBadgeText', 'setBadgeBackgroundColor', 'setTitle'].map(name => [name, async arg => { calls.push({ name, arg }); }]));
   const chrome = {
     runtime, action,
     storage: { local: { get: async () => ({}) }, session: { get: async k => ({ [k]: session[k] }), set: async v => Object.assign(session, v) }, onChanged: changes },
-    tabs: { onRemoved: event(), onUpdated: event(), sendMessage(_id, _m, cb) { cb?.(); } },
+    tabs: { onRemoved: event(), onUpdated, sendMessage(_id, _m, cb) { cb?.(); } },
     scripting: { executeScript: async () => {} },
   };
   class OffscreenCanvas {
     constructor(size) { this.size = size; }
-    getContext() { const size = this.size; return { drawImage() {}, beginPath() {}, arc() {}, fill() {}, stroke() {}, getImageData() { return { width: size, height: size }; } }; }
+    getContext() {
+      const size = this.size;
+      return {
+        drawImage() {}, beginPath() {}, arc() {}, fill() {}, stroke() {},
+        fillRect(...args) { rectDraws.push({ size, args }); },
+        getImageData() { return { width: size, height: size }; },
+      };
+    }
   }
   const sandbox = { chrome, console, TextEncoder, URL, OffscreenCanvas, setTimeout, clearTimeout,
     setInterval(fn, ms) { const id = ++timerId; intervals.set(id, { fn, ms }); return id; },
@@ -35,7 +43,7 @@ function setup(session = {}) {
   vm.createContext(sandbox); vm.runInContext(source, sandbox);
   const last = name => calls.filter(c => c.name === name).at(-1)?.arg;
   const connect = async (name, tabId) => { const p = port(name, tabId); await runtime.onConnect.emit(p); return p; };
-  return { runtime, changes, intervals, calls, requests, last, connect, session };
+  return { runtime, changes, onUpdated, intervals, calls, requests, rectDraws, last, connect, session };
 }
 
 test('idle → running with progress → unseen ready → popup clears; themes and icon cache', async () => {
@@ -113,4 +121,55 @@ test('window completion does not regress to 75% during final serialization', asy
   assert.equal(h.last('setBadgeText').text, '100%');
   assert.match(h.last('setTitle').title, /Saving snapshot/);
   await job.onMessage.emit({ type: 'AREX_RESULT_END', ok: true, markdown: 'ok' });
+});
+
+test('stopped partial result renders distinct amber pause indicator (not red !) and chunk saving progress', async () => {
+  const h = setup(); await wait();
+  const job = await h.connect('AREX_JOB', 41);
+  await job.onMessage.emit({ type: 'AREX_JOB_START', chatUuid: 'branch-p', sourceUrl: 'https://arena.ai/agent/branch-p' });
+  await job.onMessage.emit({ type: 'AREX_RESULT_CHUNK', seq: 0, totalChunks: 2, data: 'x'.repeat(600) }); await wait();
+  assert.equal(h.last('setBadgeText').text, '99%');
+  assert.match(h.last('setTitle').title, /Saving snapshot \(1\/2 chunks\)/);
+
+  await job.onMessage.emit({ type: 'AREX_RESULT_CHUNK', seq: 1, totalChunks: 2, data: 'y'.repeat(650) });
+  await job.onMessage.emit({
+    type: 'AREX_RESULT_END',
+    ok: true,
+    outcome: 'partial',
+    partial: true,
+    completedMessages: 4,
+    totalMessages: 10,
+    bytes: 1250,
+  });
+  await wait();
+
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.last('setBadgeText').text, '‖');
+  assert.equal(h.last('setBadgeBackgroundColor').color, '#e37400');
+  assert.match(h.last('setTitle').title, /Stopped · partial snapshot ready \(4\/10 msgs · 1\.3 KB\)/);
+  assert.ok(h.rectDraws.length >= 4, 'draws pause bars on 16px and 32px icon canvases');
+
+  const popup = await h.connect('AREX_POPUP');
+  await popup.onMessage.emit({ type: 'AREX_HELLO', tabId: 41 });
+  await wait();
+  assert.equal(h.last('setBadgeText').text, '');
+});
+
+test('SPA /agent/A -> /agent/B navigation stops spinner and keeps unseen abort notification until popup opens', async () => {
+  const h = setup(); await wait();
+  const job = await h.connect('AREX_JOB', 51);
+  await job.onMessage.emit({ type: 'AREX_JOB_START', chatUuid: 'branch-a', sourceUrl: 'https://arena.ai/agent/branch-a' });
+  await wait();
+  assert.equal(h.intervals.size, 1);
+
+  await h.onUpdated.emit(51, { url: 'https://arena.ai/agent/branch-b' });
+  await wait();
+  assert.equal(h.intervals.size, 0);
+  assert.equal(h.last('setBadgeText').text, '!');
+  assert.match(h.last('setTitle').title, /different Arena conversation/);
+
+  const popup = await h.connect('AREX_POPUP');
+  await popup.onMessage.emit({ type: 'AREX_HELLO', tabId: 51, chatUuid: 'branch-b', tabUrl: 'https://arena.ai/agent/branch-b' });
+  await wait();
+  assert.equal(h.last('setBadgeText').text, '');
 });
