@@ -39,6 +39,7 @@
         "content/compress-index.js",
         "content/compress-framing.js",
         "content/compress.js",
+        "content/compress-stubs.js",
         "content/profile.js",
         "content/main.js"
       ]

@@ -14,7 +14,7 @@ const assistant = body => `## 🤖 Assistant\n\n${body}`;
 const wrapper = body => `#### Ran commands 1\n\n${body}`;
 function load() {
   const ctx = vm.createContext({});
-  for (const file of ['compress-index.js', 'compress-framing.js', 'compress.js']) {
+  for (const file of ['compress-index.js', 'compress-framing.js', 'compress.js', 'compress-stubs.js']) {
     vm.runInContext(read('content/' + file), ctx, { filename: file });
   }
   return ctx.AREX;

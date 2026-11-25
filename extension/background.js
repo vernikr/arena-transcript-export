@@ -29,7 +29,7 @@ if (typeof importScripts === 'function') {
 
 const CONTENT_FILES = [
   'content/selectors.js', 'content/util.js', 'content/markdown.js', 'content/serialize.js',
-  'content/loader.js', 'content/expand.js', 'content/compress-index.js', 'content/compress-framing.js', 'content/compress.js', 'content/profile.js', 'content/main.js',
+  'content/loader.js', 'content/expand.js', 'content/compress-index.js', 'content/compress-framing.js', 'content/compress.js', 'content/compress-stubs.js', 'content/profile.js', 'content/main.js',
 ];
 
 const CONTENT_FEATURE_VERSION = '0.5.0';

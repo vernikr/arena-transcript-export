@@ -25,6 +25,7 @@ extension/
   content/markdown.js      HTML → Markdown (block-level recursive)
   content/serialize.js     3️⃣ zero-clone, zero-generator iterative walk → Markdown
   content/compress.js      deterministic Lossless/Smart/Stubs transforms + UTF-8/token metrics
+  content/compress-stubs.js  Stubs v2: path-agnostic content-defined line deduplication
   content/profile.js       bounded, zero-I/O profiling recorder for one export run
   content/main.js          tab-resident window pipeline + reconnectable status/result API
   dev-reload.js            dev-only: reload every profile when dev-version.txt changes
@@ -111,13 +112,16 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
 - **Smart:** strips terminal ANSI/progress noise, folds runs of at least six recognised passing-test
   lines, and keeps the head/tail of very large clean stdout blocks. Error-signalled output is never
   head/tail-truncated.
-- **Stubs:** after Smart, replace only verified identical consecutive lines in a later read or
-  heredoc write with a marker identifying the earlier intact output and its line range. Reference
-  sources are never themselves stubbed; duplicate anchors used by Lossless retain their full body.
-  Different versions and non-overlapping ranges are not discarded merely because the path matches.
-  Smart remains lossy and can still shorten unique long output before this step. Simple `cat`,
-  `sed -n`, `head`, `tail`, and `nl` commands are paired with their own stdout; ambiguous shell
-  expressions are left unclassified.
+- **Stubs (v2):** after Smart, every eligible block (`stdout`/`stderr` output, 📄 file artifact
+  cards, unlabeled tool outputs and `command` write payloads) is matched against a single bounded
+  global rolling 4-line seed index built in transcript order — so matching is *content-defined and
+  path-agnostic*. Compound `for f in …; do cat "$f"; done` reads, 📄 file cards and later `sed -n`
+  slices deduplicate shared ≥4-line chunks without `commandInfo()` path inference. Optional `cat -n`
+  / `nl` line-number prefixes are normalized during lookup (the marker records when numbering
+  differed). A block is replaced only with a marker `[... identical to lines A–B of earlier output
+  #arex-stubs-output-K ...]` when the net UTF-8 delta is ≤ −80 B. Reference sources are never
+  themselves stubbed (no reference chains), and different versions / non-overlapping ranges stay
+  intact. Implementation lives in `extension/content/compress-stubs.js`.
 - The size card uses the final download Blob's exact byte length, displays exact UTF-8 bytes
   plus decimal KB/MB, an approximate multilingual token count, and savings against raw Markdown.
   Finder's “size on disk” is a separate filesystem allocation figure. The token estimator is

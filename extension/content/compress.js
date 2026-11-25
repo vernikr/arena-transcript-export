@@ -312,97 +312,16 @@ globalThis.AREX = globalThis.AREX || {};
       if (smartBytes <= bytes) { edits = smartEdits; bytes = smartBytes; tokens = smartTokens; stats.smartCompacted = count; }
     }
 
-    if (mode === 'stubs') {
-      // Reuse only byte-identical consecutive lines that remain visible in an
-      // earlier output. Different reads/ranges and old file versions may contain
-      // unique information; a later read does not prove they were superseded.
-      const groups = new Map();
-      for (const block of blocks) {
-        if (edits.get(block)?.reference || failed(block)) continue;
-        let identity = readIdentity(block), type = 'read';
-        if (block.label === 'command') {
-          const info = commandInfo(block.body);
-          if (info?.kind !== 'write') continue;
-          type = 'write'; identity = { key: (info.path.startsWith('/') ? '' : info.cwd) + '\0' + info.path };
-        } else if (!safeRead(block) && ERROR_SIGNAL.test(block.body)) continue;
-        if (!identity) continue;
-        const key = type + '\0' + identity.key;
-        const list = groups.get(key) || []; list.push(block); groups.set(key, list);
-      }
-      const stubEdits = new Map(edits), reservedIds = new Set();
+    if (mode === 'stubs' && typeof AREX.compressStubs === 'function') {
+      // Path-agnostic, content-defined line deduplication (Stubs v2, issue #8).
+      // Delegated to compress-stubs.js so the algorithm, rolling seed index and
+      // cat -n / nl normalization live in their own module.
+      const reservedIds = new Set();
       for (const match of raw.matchAll(/arex-stubs-output-(\d+)/g)) reservedIds.add(match[1]);
-      let stubBytes = bytes, stubTokens = tokens, count = 0, nextStubId = 1;
-      for (const entries of groups.values()) {
-        if (entries.length < 2) continue;
-        const seeds = new Map();
-        for (const block of entries) {
-          const current = stubEdits.get(block)?.body ?? block.body;
-          const lines = current.split('\n');
-          const pieces = []; let i = 0, used = new Set();
-          while (i < lines.length) {
-            // Bounded fingerprints are always verified with exact line equality.
-            const key = lines.slice(i, i + 4).join('\n');
-            const candidates = !stubEdits.get(block)?.anchor && i + 4 <= lines.length && key.length <= 2048 ? seeds.get(key) : null;
-            let best = null;
-            for (const source of candidates || []) {
-              let n = 0;
-              while (n < 4096 && i + n < lines.length && source.pos + n < source.lines.length &&
-                     lines[i + n] === source.lines[source.pos + n]) n++;
-              if (!best || n > best.n) best = { ...source, n };
-            }
-            if (best && best.n >= 5) {
-              const marker = '[... identical to lines ' + (best.pos + 1) + '–' + (best.pos + best.n) +
-                ' of earlier output #arex-stubs-output-' + best.id + ' ...]';
-              const original = lines.slice(i, i + best.n).join('\n');
-              if (utf8Bytes(original) >= utf8Bytes(marker) + 100) {
-                pieces.push(marker); used.add(best); i += best.n; continue;
-              }
-            }
-            pieces.push(lines[i++]);
-          }
-          const replacement = pieces.join('\n');
-          if (used.size && utf8Bytes(replacement) < utf8Bytes(current)) {
-            // Charge each newly inserted anchor before deciding to keep the edit.
-            const undo = []; let delta = 0, tokenDelta = 0;
-            for (const source of used) {
-              const previous = stubEdits.get(source.block) || {};
-              if (!previous.stubAnchor) {
-                const had = stubEdits.has(source.block);
-                const prev = stubEdits.get(source.block);
-                const [bd, td] = setEdit(stubEdits, source.block, { ...previous, stubAnchor: source.id });
-                undo.push({ b: source.block, had, prev });
-                delta += bd; tokenDelta += td;
-              }
-            }
-            {
-              const had = stubEdits.has(block);
-              const prev = stubEdits.get(block);
-              const [bd, td] = setEdit(stubEdits, block, { ...stubEdits.get(block), body: replacement });
-              undo.push({ b: block, had, prev });
-              delta += bd; tokenDelta += td;
-            }
-            if (delta < 0) { stubBytes += delta; stubTokens += tokenDelta; count++; continue; }
-            for (let u = undo.length - 1; u >= 0; u--) {
-              const e = undo[u];
-              if (e.had) stubEdits.set(e.b, e.prev); else stubEdits.delete(e.b);
-            }
-          }
-          // Only unchanged blocks become sources, preventing reference chains
-          // and ensuring line numbers remain valid even after later edits.
-          while (reservedIds.has(String(nextStubId))) nextStubId++;
-          const id = nextStubId++;
-          for (let pos = 0; pos + 4 <= lines.length; pos++) {
-            const key = lines.slice(pos, pos + 4).join('\n');
-            if (key.length > 2048) continue;
-            const values = seeds.get(key);
-            if (!values && seeds.size >= 20000) continue;
-            const slots = values || [];
-            if (slots.length < 4) slots.push({ block, id, lines, pos });
-            seeds.set(key, slots);
-          }
-        }
+      const stubbed = AREX.compressStubs(blocks, edits, bytes, tokens, setEdit, reservedIds, { mode });
+      if (stubbed.bytes <= bytes) {
+        edits = stubbed.edits; bytes = stubbed.bytes; tokens = stubbed.tokens; stats.stubbed = stubbed.stubbed;
       }
-      if (stubBytes <= bytes) { edits = stubEdits; bytes = stubBytes; tokens = stubTokens; stats.stubbed = count; }
     }
 
     const parts = []; let last = 0;
@@ -441,4 +360,12 @@ globalThis.AREX = globalThis.AREX || {};
   AREX.measureMarkdown = markdown => ({ bytes: utf8Bytes(markdown), estimatedTokens: estimateTokens(markdown) });
   AREX.formatBytes = formatBytes;
   AREX.formatByteCount = formatByteCount;
+
+  // Exposed for compress-stubs.js (issue #8): path / error helpers reused by the
+  // Stubs v2 eligibility check. Otherwise internal to compress.js.
+  AREX.commandInfo = commandInfo;
+  AREX.safeRead = safeRead;
+  AREX.failed = failed;
+  AREX.ERROR_SIGNAL = ERROR_SIGNAL;
+  AREX.EXECUTION_ERROR = EXECUTION_ERROR;
 })();
