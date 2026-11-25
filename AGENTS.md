@@ -56,8 +56,11 @@ never a copy step — profiles must not be edited individually.
 - Keep the plumbing intact: `"alarms"` in `extension/manifest.json` permissions, the
   `importScripts('dev-reload.js')` line in `extension/background.js`, and the
   `extension/dev-version.txt` rule in `.gitignore`. Never commit the sentinel file.
-- Bootstrap is done already (one manual reload per profile after `dev-reload.js` first landed).
-  Do not repeat it unless the plumbing was rewritten.
+- One-time bootstrap, and only after code older than 0.4.2 is still loaded: a profile that
+  holds pre-`dev-reload.js` code cannot react to the sentinel and needs exactly one manual
+  reload (`chrome://extensions` → card → **Reload**, or restart Chrome). A profile whose
+  window was closed loads the new code from disk on its next launch by itself. Once a profile
+  is on 0.4.2+, never reload by hand again — the sentinel handles every later push.
 
 ### Test caveat
 
