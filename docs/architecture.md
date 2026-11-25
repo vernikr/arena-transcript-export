@@ -27,6 +27,7 @@ extension/
   content/compress.js      deterministic Lossless/Smart/Stubs transforms + UTF-8/token metrics
   content/profile.js       bounded, zero-I/O profiling recorder for one export run
   content/main.js          tab-resident window pipeline + reconnectable status/result API
+  dev-reload.js            dev-only: reload every profile when dev-version.txt changes
 ```
 
 Content scripts run in the isolated world and only touch the DOM; no `page JS` access needed.
@@ -39,7 +40,7 @@ All scripts share one global namespace `AREX` (manifest load order = init order)
 slowest message index), per-window records for the slowest windows only (capped, the rest is
 counted), Chromium heap samples (best-effort), a short milestone event list, and per-run totals.
 It performs no I/O or timers during the run — only `performance.now()` and small object pushes —
-and writes one JSON document at the end (hard-capped at 64 KiB), so it stays cheap on very large
+and writes one JSON document at the end (hard-capped at 128 KiB), so it stays cheap on very large
 pages and the resulting log is easy for an agent to triage. Profiling is enabled by default; the
 popup's **Performance profiling** option disables it for the run (`options.profile: false`). The
 profile is persisted by the background worker next to the snapshot (`latest-profile`,
@@ -155,7 +156,14 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   five times and resends any unacknowledged result; exhausted retries require a fresh snapshot.
 - Result chunks must have unique consecutive sequence numbers and match the declared UTF-8 byte
   length. Invalid, incomplete or oversized transfers fail without an ACK or partial IndexedDB write.
-  The size guard limits the assembled transfer to 64 Mi UTF-16 code units, not UTF-8 bytes.
+  The transfer guard is **128 Mi UTF-16 code units** (code-point aware, not a 128 MiB UTF-8 limit);
+  byte counts are computed without allocating an encoded copy, including across chunk boundaries
+  that split a surrogate pair.
+- A job exists from the moment the content script opens its `AREX_JOB` port, and a fresh job is
+  created in `running` state while it waits for `AREX_JOB_START`. A tab that never ran an export has
+  no job entry, so popups see `job: null`; a tab that ran one keeps its terminal job
+  (`done` / `stopped` / `error`) until it is archived by a branch switch, a tab close, or the LRU
+  cap. Finished results are restored from the scoped IndexedDB snapshot, not from the job entry.
 
 ## Delivery & UX details
 
@@ -189,6 +197,17 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   `arena-transcript-export-<tag>.zip` to the GitHub Release (`--clobber`); `ci.yml` runs
   `npm test` on every push. Users install the release zip as an unpacked extension.
 
+## Versions & consistency
+
+Four literals carry the shipped version and must move together: `package.json` / `package-lock.json`
+(`version`), `extension/manifest.json` (`version`), `background.js`
+(`CONTENT_FEATURE_VERSION`) and `content/main.js` (`toolVersion` and the `featureVersion` returned by
+the `AREX_PING` readiness probe). `test/version.test.mjs` parses all of them out of the sources and
+fails on any drift, also failing loudly if a constant is renamed; it also pins the cross-cutting npm
+scripts (`test`, `benchmark`, `benchmark:archive`, `benchmark:large`) and checks that the files they
+reference exist. The feature string is a re-injection trigger: raising it makes an already-open tab
+pick up the new content script instead of silently running stale code.
+
 ## Risks & mitigations
 
 | Risk | Mitigation |
@@ -202,10 +221,25 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
 
 ## Testing
 
-`npm test` (node:test + jsdom): markdown converter cases; serializer over the saved transcript
-fixture (546 KB, 9 messages) asserting message order/roles, fences, exclusion of sidebar/panel
-artifacts; loader/expander loops against synthetic DOMs that emulate Arena's mount-on-click and
-prepend-on-scroll behavior with fake timers; popup-port reconnect tests cover scan continuation,
-progress replay, result delivery and acknowledgement; fake IndexedDB verifies shared storage and
-transaction behavior, and `npm run benchmark` records scoped fixture/token/compression measurements.
-See `docs/performance-results.md` for methodology, limitations and measured results.
+`npm test` (node:test + jsdom) runs per-module suites plus two integration layers:
+
+- **Unit & module suites.** Markdown converter cases; serializer over the saved transcript fixture
+  (546 KB, 9 messages) asserting message order/roles, fences and exclusion of sidebar/panel
+  artifacts; loader/expander loops against synthetic DOMs that emulate Arena's mount-on-click and
+  prepend-on-scroll with fake timers; popup-port reconnect tests for scan continuation, progress
+  replay, result delivery and acknowledgement; fake IndexedDB for storage and transaction behavior;
+  `test/version.test.mjs` for the cross-module version handshake.
+- **Integration gate** (`test/integration-gate.test.mjs`). Real `background.js` + real
+  `shared/result-store.js` on fake-indexeddb, driven through a synthetic three-tab matrix: scoped
+  isolation of A/B/C, same-tab SPA branch switch, Stop during history paging vs. Stop after K
+  windows, and `AREX_EXPORT_LOG` at idle / running / stopped / error / done. It also re-asserts
+  byte parity of the full windowed pipeline against `test/snapshots/fixture-expected.md`.
+- **Stress suite** (`test/large-page-stress.test.mjs`). 120 turns / 2,400 spoilers with streaming
+  tail mutations: no `settle()` tail-stall, deterministic output, leak-free DOM after a mid-run stop,
+  bounded diagnostic snapshots, one click per opened control.
+
+Benchmarks: `npm run benchmark` (fixture/token/compression/history), `npm run benchmark:large`
+(large-page window pipeline) and `npm run benchmark:archive -- <saved page>`. See
+`docs/performance-results.md` for methodology, measured numbers and limitations — jsdom numbers are
+not browser latency, and no Node test exercises real Chrome service-worker lifetimes, the rendered
+popup or a live Arena page.

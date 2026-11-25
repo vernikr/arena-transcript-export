@@ -8,7 +8,7 @@
 // on its own — no CDP, no chrome://extensions, no copy-per-profile.
 //
 // Why a sentinel file and not manifest.version: the version is bumped only for
-// real releases (0.4.2 today), so it would miss most pushes.
+// real releases (0.5.0 today), so it would miss most pushes.
 // Why chrome.alarms and not a WebSocket: MV3 puts the service worker to sleep
 // after ~30 s, which kills any socket; alarms wake it back up.
 //

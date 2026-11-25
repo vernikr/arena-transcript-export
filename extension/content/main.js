@@ -368,7 +368,7 @@ AREX.runExport = async function (options = {}) {
   // passes options.profile = false to keep the run free of profiling overhead.
   const profiler = AREX.createProfiler({
     enabled: options.profile !== false,
-    toolVersion: '0.4.2',
+    toolVersion: '0.5.0',
     sourceUrl: location.href,
     chatUuid: AREX.chatUuid?.() || null,
     options,
@@ -519,7 +519,7 @@ AREX.runExport = async function (options = {}) {
 if (typeof chrome !== 'undefined' && chrome.runtime?.id) {
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg?.type === 'AREX_PING') {
-      sendResponse({ ok: true, compressionPreview: true, featureVersion: '0.4.2' });
+      sendResponse({ ok: true, compressionPreview: true, featureVersion: '0.5.0' });
       return;
     }
     if (msg?.type === 'AREX_EXPORT_CANCEL') {

@@ -4,10 +4,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # Full history so `npm run benchmark` can diff against its baseline ref;
+      # a shallow clone silently skips the baseline comparison instead.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
       - run: npm test
+      # Wave 4.1 integration gate: both benchmarks assert invariants and exit
+      # non-zero on a regression, so they run here rather than only locally.
+      - run: npm run benchmark
+      - run: npm run benchmark:large

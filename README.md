@@ -33,7 +33,7 @@ that tab stops the in-tab task.
   written to the tab and saved in IndexedDB next to the snapshot. It includes per-phase timings
   (history, expand, cleanup, process), per-message timing aggregates (count/mean/p95/max), the
   slowest windows, Chromium heap samples and a short milestone event list. It stays cheap even on
-  very large pages (the document is hard-capped at 64 KiB) and is produced only for the run; nothing
+  very large pages (the document is hard-capped at 128 KiB) and is produced only for the run; nothing
   is logged during the export itself. The popup shows a compact summary and offers a
   **Download profile (JSON)** button. Disable it to keep a run free of profiling overhead.
 - **Compress history** (default on) — choose one of three deterministic modes:
@@ -94,7 +94,9 @@ GitHub Release; `ci.yml` runs the test suite on every push.
 
 ## Markdown schema
 
-Document header: `# branch title`, source URL, export timestamp, message count. Each turn:
+Document header: `# branch title`, source URL, export timestamp, message count. A stopped export adds
+one line before the closing rule — `- Status: Partial export (<captured>/<total> messages)` — and is
+otherwise identical to a complete export, so it stays a valid Markdown document. Each turn:
 
 - `## 👤 User` — text (converted from the rendered markup) + `📎 **Attached:** …` chips.
 - `## 🤖 Assistant` — answer prose; each activity item as `#### used Bash 143ms`-style heading
@@ -112,7 +114,9 @@ Document header: `# branch title`, source URL, export timestamp, message count. 
   is observed, the exporter falls back to quiet rounds; a visible stuck loader or sentinel produces a
   warning instead of silently claiming completion.
 - The background coordinator rejects corrupted or oversized transfers rather than saving partial
-  exports. The in-memory transfer guard is 64 Mi UTF-16 code units; larger exports are rejected.
+  exports. The transfer guard is 128 Mi UTF-16 code units (roughly 256 MB UTF-8 for ASCII, more for
+  CJK), checked with code-point-aware byte counting across chunk boundaries; larger exports are
+  rejected with an explicit error rather than truncated.
   A disconnected worker is retried up to five times, including after scanning finishes; if retries
   are exhausted, keep the Arena tab open and retake the snapshot.
 - If Arena eventually introduces real DOM windowing (unloading rendered messages — none today),
@@ -120,14 +124,27 @@ Document header: `# branch title`, source URL, export timestamp, message count. 
 
 ## Dev
 
-No build step, no runtime dependencies. `npm install` once for the development dependencies, then `npm test`
-(node:test; jsdom unit tests over a saved Arena transcript fixture, snapshot at
-`test/snapshots/fixture-expected.md` — regenerate with `UPDATE_SNAPSHOT=1 npm test`).
-Run `npm run benchmark` for the reproducible jsdom/Node regression benchmark; see
-`docs/performance-results.md` for its scope and a recorded result.
+No build step, no runtime dependencies. `npm install` once for the development dependencies, then:
 
-- `docs/architecture.md` — module design, pipeline, DOM→MD mapping, risks.
+| Command | What it does |
+|---|---|
+| `npm test` | `node:test` + jsdom: unit suites, the cross-module integration gate, and the large-page stress suite over a synthetic 120-turn / 2,400-spoiler transcript |
+| `npm run benchmark` | reproducible jsdom/Node regression benchmark (serializer, token estimate, compression, history probe) with snapshot-parity checks |
+| `npm run benchmark:large` | large-page pipeline benchmark: per-window expand/serialize/cleanup percentiles, cleanup click count, heap delta; exits non-zero if an invariant regresses |
+| `npm run benchmark:archive -- /path/to/page.html` | the same serializer/compression measurements against a saved Arena page kept outside the repo |
+
+The expected Markdown snapshot is `test/snapshots/fixture-expected.md` — regenerate it with
+`UPDATE_SNAPSHOT=1 npm test` after an intentional output change. `docs/performance-results.md`
+records the measured numbers and their scope.
+
+Versions are kept in lockstep by `test/version.test.mjs`: `package.json`, `package-lock.json`,
+`extension/manifest.json`, `background.js` (`CONTENT_FEATURE_VERSION`) and `content/main.js`
+(`toolVersion` / `featureVersion`). Bump all of them together — the feature string is what makes an
+already-open tab re-inject the new content script.
+
+- `docs/architecture.md` — module design, pipeline, DOM→MD mapping, storage invariants, risks.
 - `docs/research/arena-page-analysis.md` — how Arena loads/renders the transcript (evidence).
+- `docs/performance-results.md` — measured benchmarks, the integration matrix, and their limits.
 
 Page markup is obfuscated Tailwind CSS and may drift; all queries live in
 `extension/content/selectors.js` and lean on `data-*`/`role` hooks. If export degrades after an
