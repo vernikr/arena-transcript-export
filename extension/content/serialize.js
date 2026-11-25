@@ -123,21 +123,53 @@ window.AREX = window.AREX || {};
     return q(S.FOOTER_COPY, el) ? el : null;
   };
 
-  // Uppercase label chip (command/stdout/stderr) of the card containing `pre`.
+  // Only look in a card's own header, never in another card under the
+  // shared panel. Cache the header result, not a descendant-wide search.
   function cardLabel(pre, boundary, cache = new WeakMap()) {
-    let node = pre;
-    while (node.parentElement && node !== boundary && !isItemWrapper(node)) {
-      node = node.parentElement;
+    let branch = pre;
+    for (let node = pre.parentElement; node && node !== boundary && !isItemWrapper(node);
+      branch = node, node = node.parentElement) {
       let label = cache.get(node);
       if (label === undefined) {
         label = '';
-        for (const span of node.getElementsByTagName('span')) {
-          const text = txt(span).toLowerCase();
-          if (S.CARD_LABELS.includes(text)) { label = text; break; }
+        const header = node.firstElementChild;
+        if (header && header.tagName !== 'PRE' && !header.querySelector('pre')) {
+          const spans = header.tagName === 'SPAN' ? [header] : header.getElementsByTagName('span');
+          for (const span of spans) {
+            const text = txt(span).toLowerCase();
+            if (S.CARD_LABELS.includes(text)) { label = text; break; }
+          }
         }
         cache.set(node, label);
       }
-      if (label) return label;
+      // The header must be a sibling of the branch leading to this pre.
+      if (label && node.firstElementChild !== branch) return label;
+    }
+    return '';
+  }
+
+  // Arena may mount later output chunks as unlabelled sibling <pre>s (or
+  // single-pre wrappers). Inherit only from the immediately preceding chunk,
+  // in the same Used Bash item, and never inherit a command label.
+  function continuationLabel(pre, boundary, labels) {
+    let item = pre.parentElement;
+    while (item && item !== boundary && !isItemWrapper(item)) item = item.parentElement;
+    if (!item || item === boundary || !/^used\s+bash\b/i.test(AREX.headerText(item) || '')) return '';
+
+    let branch = pre;
+    while (branch.parentElement && branch.parentElement !== item && branch.parentElement !== boundary) {
+      const prev = branch.previousElementSibling;
+      if (prev) {
+        const pres = prev.tagName === 'PRE' ? [prev] : prev.getElementsByTagName('pre');
+        if (pres.length !== 1) return '';
+        const label = labels.get(pres[0]);
+        return label === 'stdout' || label === 'stderr' ? label : '';
+      }
+      const parent = branch.parentElement;
+      // Only climb through transparent, single-child wrappers; do not cross
+      // a card header, a different panel, or arbitrary intervening content.
+      if (parent.children.length !== 1 || parent.textContent !== branch.textContent) return '';
+      branch = parent;
     }
     return '';
   }
@@ -227,7 +259,8 @@ window.AREX = window.AREX || {};
     const chip = fileChip(el);
     if (chip) { sink.push(renderFileChip(el, chip)); return; }
     if (el.tagName === 'PRE') {
-      const lbl = cardLabel(el, boundary, labels);
+      const lbl = cardLabel(el, boundary, labels) || continuationLabel(el, boundary, labels);
+      labels.set(el, lbl);
       const lang = lbl === 'command' ? 'bash' : 'text';
       sink.push([lbl ? `**${lbl}:**` : '', AREX.mdFence(codeText(el), lang)].filter(Boolean).join('\n\n'));
       return;
