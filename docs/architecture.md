@@ -102,7 +102,8 @@ be reclaimed; spoilers that were already open before export remain open.
 ## Compression preview
 
 The popup sends the raw snapshot once to `popup/compress-worker.js`, which builds a single
-`BlockIndex` and caches each computed mode. `content/compress.js` works in both window and worker
+`BlockIndex` and caches each computed mode (and, for Smart/Stubs, each `${mode}:${condenseThoughts}`
+result; see below). `content/compress.js` works in both window and worker
 contexts; transforms edit indexed blocks and assemble the output once per mode. The UI ignores
 stale mode/snapshot replies and downloads the prepared result without recompression. If the worker
 is unavailable or fails, a local fallback keeps exports usable but can block the popup temporarily.
@@ -122,6 +123,32 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   #arex-stubs-output-K ...]` when the net UTF-8 delta is ≤ −80 B. Reference sources are never
   themselves stubbed (no reference chains), and different versions / non-overlapping ranges stay
   intact. Implementation lives in `extension/content/compress-stubs.js`.
+- **Condense long reasoning (Smart/Stubs, `condenseThoughts`, default on):**
+  `content/compress-thoughts.js` post-processes the `compressIndex` result. It indexes that
+  Markdown with `AREX.buildDocumentIndex` and edits only assistant `Thought` / `Thought for …`
+  sections through `AREX.applySpanEdits`. User turns and every assistant `answerSpan` are passed as
+  protected spans, so an edit that touches them throws and the pass is dropped. A Thought is split
+  into blank-line separated blocks with fenced code kept atomic. Smart (over 2,600 B, at least 5
+  blocks) keeps the first and last two blocks; Stubs (over 900 B, at least 3) keeps the first and
+  last one. Each run of middle blocks of at least 300 / 250 characters collapses to
+  `_[... condensed N intermediate reasoning blocks (M chars) ...]_`. A Thought followed by no
+  later activity in its turn is skipped, because prose glued to it could be the final answer.
+  Stubs v2 indexes error-free Thought fences like any other output, so a later write that repeats
+  such a draft already points back at the draft's anchor. For the drafts v2 skips (unlabeled fences
+  that mention errors), a fenced draft in a Thought is replaced piecewise (runs of at least 5
+  identical lines saving at least 100 B) by `[... draft identical to lines A–B of later output
+  #arex-stubs-output-ID ...]` when a later heredoc write or file artifact of the same turn repeats
+  it; the target gets an `arex-stubs-output-ID` anchor, reusing an existing one. A block that carries
+  an `arex-…output-N` anchor is never condensed or replaced, because other markers point at it.
+  Only byte-reducing results are kept, and any failure returns the previous stage unchanged. The
+  pass adds `thoughtsCondensed`, `blocksCondensed`, `charsCondensed` and `draftsDeduplicated` to
+  the result stats; the popup's download summary reports `deduplicated`, `smartCompacted`,
+  `stubbed` and `thoughtsCondensed`.
+- The popup persists the checkbox in `chrome.storage.sync` and sends `{ mode, condenseThoughts }`
+  with `GET_MODE` / `GET_MARKDOWN`. The worker ignores the flag for Off/Lossless (always keyed
+  `:false`), computes each mode's base result once and each `${mode}:${condenseThoughts}` result
+  once, and echoes the effective flag in its replies. The popup keys its preview cache and
+  stale-reply guards the same way, so toggling never rescans the Arena DOM.
 - The size card uses the final download Blob's exact byte length, displays exact UTF-8 bytes
   plus decimal KB/MB, an approximate multilingual token count, and savings against raw Markdown.
   Finder's “size on disk” is a separate filesystem allocation figure. The token estimator is

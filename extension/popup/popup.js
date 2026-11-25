@@ -25,6 +25,7 @@ const optProfile = $('#profileOpt');
 const profileSummary = $('#profileSummary');
 const profileDownload = $('#profileDownload');
 const optCompress = $('#compressHistory');
+const optCondense = $('#condenseThoughts');
 const compression = $('#compression');
 const modeButtons = [...document.querySelectorAll('.mode')];
 const modeDescription = $('#modeDescription');
@@ -51,10 +52,14 @@ const logNotice = $('#logNotice');
 const STAGE_ORDER = ['history', 'expand', 'process', 'serialize', 'saving'];
 const STAGE_PERCENT = { history: 10, expand: 45, serialize: 75, saving: 92, done: 100 };
 const MODE_DESCRIPTIONS = {
-  off: 'Raw Markdown: no deduplication or compaction is applied.',
-  lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block.',
+  off: 'Raw Markdown: no deduplication, compaction or reasoning changes are applied.',
+  lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block. Reasoning is never changed.',
   smart: 'Lossless + removes terminal noise, folds long passing-test runs and trims very long clean logs. Error output is preserved.',
   stubs: 'Smart + references identical lines in earlier file outputs; Smart can still omit unique lines.',
+};
+const REASONING_NOTES = {
+  condensed: ' Long middle reasoning blocks are condensed; your messages and final answers are never changed.',
+  kept: ' Reasoning is kept in full.',
 };
 const LOG_EXPORT_TIMEOUT_MS = 20000;
 // A Blob URL stays alive until the browser reports the download as finished.
@@ -100,11 +105,13 @@ chrome.storage.sync.get({
   timestamps: false,
   compressHistory: true,
   compressionMode: 'lossless',
+  condenseThoughts: true,
   profile: true,
 }, options => {
   optActivity.checked = options.includeToolActivity;
   optTimestamps.checked = options.timestamps;
   optProfile.checked = options.profile !== false;
+  optCondense.checked = options.condenseThoughts !== false;
   activeMode = ['off', 'lossless', 'smart', 'stubs'].includes(options.compressionMode)
     ? options.compressionMode : 'lossless';
   optCompress.checked = options.compressHistory !== false && activeMode !== 'off';
@@ -118,6 +125,7 @@ function persistOptions() {
     timestamps: optTimestamps.checked,
     compressHistory: optCompress.checked,
     compressionMode: activeMode,
+    condenseThoughts: optCondense.checked,
     profile: optProfile.checked,
   });
 }
@@ -126,17 +134,31 @@ function compressionMode() {
   return optActivity.checked && optCompress.checked && activeMode !== 'off' ? activeMode : 'off';
 }
 
+// The toggle only applies to Smart and Stubs; Off/Lossless ignore it but keep the saved choice.
+function condenseSelected(mode = compressionMode()) {
+  return (mode === 'smart' || mode === 'stubs') && optCondense.checked;
+}
+
+const modeKey = (mode, condense) => mode + ':' + condense;
+const previewKey = () => modeKey(compressionMode(), condenseSelected());
+
+function describeMode(mode) {
+  if (mode !== 'smart' && mode !== 'stubs') return MODE_DESCRIPTIONS[mode];
+  return MODE_DESCRIPTIONS[mode] + (condenseSelected(mode) ? REASONING_NOTES.condensed : REASONING_NOTES.kept);
+}
+
 function updateCompressionControls() {
   const available = optActivity.checked;
   optCompress.disabled = !available;
   const mode = compressionMode();
+  optCondense.disabled = !available || (mode !== 'smart' && mode !== 'stubs');
   compression.classList.toggle('disabled', !available);
   modeButtons.forEach(button => {
     button.disabled = !available;
     button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
   });
   modeDescription.textContent = available
-    ? MODE_DESCRIPTIONS[mode]
+    ? describeMode(mode)
     : 'Enable tool activity to compress command outputs and repeated file snapshots.';
 }
 
@@ -152,7 +174,7 @@ function updatePrimary() {
   else if (downloading) btn.textContent = 'Saving…';
   else if (prepared) btn.textContent = preparedPartial ? 'Download Partial Markdown' : 'Download Markdown';
   else btn.textContent = 'Prepare preview';
-  const previewReady = !prepared || Boolean(prepared.preview && prepared.previewMode === compressionMode());
+  const previewReady = !prepared || Boolean(prepared.preview && prepared.previewMode === previewKey());
   btn.disabled = preparing || downloading || previewBusyCount > 0 || !hasArenaTab || !previewReady;
   refreshDiagnostics();
 }
@@ -757,7 +779,7 @@ function initializeCompression(snapshot) {
   if (compressionState) for (const pending of compressionState.pending.values()) pending.reject(new Error('Snapshot replaced.'));
   const state = {
     snapshot, id: ++nextSnapshotId, worker: null, pending: new Map(),
-    cache: new Map(), requests: new Map(), fallbackIndex: null, fallbackMarkdown: new Map(),
+    cache: new Map(), requests: new Map(), fallbackIndex: null, fallbackBase: new Map(), fallbackResults: new Map(),
   };
   compressionState = state;
   try {
@@ -785,64 +807,69 @@ function initializeCompression(snapshot) {
   }
 }
 
-function fallbackCompress(state, mode) {
-  state.fallbackIndex ||= AREX.buildMarkdownIndex(state.snapshot.markdown);
-  const result = AREX.compressIndex(state.fallbackIndex, { mode });
-  state.fallbackMarkdown.set(mode, result.markdown);
-  const { markdown, ...meta } = result;
+function fallbackResult(state, mode, condense) {
+  const key = modeKey(mode, condense);
+  if (!state.fallbackResults.has(key)) {
+    state.fallbackIndex ||= AREX.buildMarkdownIndex(state.snapshot.markdown);
+    if (!state.fallbackBase.has(mode)) state.fallbackBase.set(mode, AREX.compressIndex(state.fallbackIndex, { mode }));
+    const base = state.fallbackBase.get(mode);
+    state.fallbackResults.set(key, AREX.applyThoughtCondensation
+      ? AREX.applyThoughtCondensation(base, { mode, condenseThoughts: condense })
+      : base);
+  }
+  return state.fallbackResults.get(key);
+}
+
+function fallbackCompress(state, mode, condense) {
+  const { markdown, ...meta } = fallbackResult(state, mode, condense);
   return meta;
 }
 
-function fallbackMarkdown(state, mode) {
-  const cached = state.fallbackMarkdown.get(mode);
-  if (cached != null) return cached;
-  state.fallbackIndex ||= AREX.buildMarkdownIndex(state.snapshot.markdown);
-  const result = AREX.compressIndex(state.fallbackIndex, { mode });
-  state.fallbackMarkdown.set(mode, result.markdown);
-  return result.markdown;
-}
+const fallbackMarkdown = (state, mode, condense) => fallbackResult(state, mode, condense).markdown;
 
 // Mode previews only move statistics across the port (includeMarkdown: false);
-// the multi-megabyte Markdown string is fetched lazily on Download.
-function previewFor(state, mode) {
-  if (state.cache.has(mode)) return Promise.resolve(state.cache.get(mode));
-  if (state.requests.has(mode)) return state.requests.get(mode);
+// the multi-megabyte Markdown string is fetched lazily on Download. Results are
+// cached per mode and condense choice, so toggling never rescans the Arena tab.
+function previewFor(state, mode, condense) {
+  const key = modeKey(mode, condense);
+  if (state.cache.has(key)) return Promise.resolve(state.cache.get(key));
+  if (state.requests.has(key)) return state.requests.get(key);
   let work;
   if (state.worker) {
     const requestId = ++nextRequestId;
     work = new Promise((resolve, reject) => {
       state.pending.set(requestId, { resolve, reject, kind: 'preview' });
-      try { state.worker.postMessage({ type: 'GET_MODE', snapshotId: state.id, requestId, mode, includeMarkdown: false }); }
+      try { state.worker.postMessage({ type: 'GET_MODE', snapshotId: state.id, requestId, mode, condenseThoughts: condense, includeMarkdown: false }); }
       catch (error) { state.pending.delete(requestId); reject(error); }
     }).catch(error => {
       if (compressionState !== state) throw error;
       disableCompressionWorker(state, error);
-      return fallbackCompress(state, mode);
+      return fallbackCompress(state, mode, condense);
     });
   } else {
     // Defer the fallback so the popup can paint its busy state first.
-    work = delay(0).then(() => fallbackCompress(state, mode));
+    work = delay(0).then(() => fallbackCompress(state, mode, condense));
   }
-  const request = work.then(result => { state.cache.set(mode, result); return result; }).finally(() => state.requests.delete(mode));
-  state.requests.set(mode, request);
+  const request = work.then(result => { state.cache.set(key, result); return result; }).finally(() => state.requests.delete(key));
+  state.requests.set(key, request);
   return request;
 }
 
-function markdownForMode(state, mode) {
+function markdownForMode(state, mode, condense) {
   let work;
   if (state.worker) {
     const requestId = ++nextRequestId;
     work = new Promise((resolve, reject) => {
       state.pending.set(requestId, { resolve, reject, kind: 'markdown' });
-      try { state.worker.postMessage({ type: 'GET_MARKDOWN', snapshotId: state.id, requestId, mode }); }
+      try { state.worker.postMessage({ type: 'GET_MARKDOWN', snapshotId: state.id, requestId, mode, condenseThoughts: condense }); }
       catch (error) { state.pending.delete(requestId); reject(error); }
     }).catch(error => {
       if (compressionState !== state) throw error;
       disableCompressionWorker(state, error);
-      return fallbackMarkdown(state, mode);
+      return fallbackMarkdown(state, mode, condense);
     });
   } else {
-    work = Promise.resolve().then(() => fallbackMarkdown(state, mode));
+    work = Promise.resolve().then(() => fallbackMarkdown(state, mode, condense));
   }
   return work;
 }
@@ -850,6 +877,7 @@ function markdownForMode(state, mode) {
 async function renderSizePreview() {
   if (!prepared || !compressionState) return;
   const state = compressionState, snapshot = prepared, mode = compressionMode();
+  const condense = condenseSelected(mode), key = modeKey(mode, condense);
   snapshot.preview = null;
   snapshot.previewMode = null;
   sizePreview.hidden = false;
@@ -859,10 +887,10 @@ async function renderSizePreview() {
   savedValue.textContent = '';
   startPreviewBusy();
   try {
-    const preview = await previewFor(state, mode);
-    if (compressionState !== state || prepared !== snapshot || compressionMode() !== mode) return;
+    const preview = await previewFor(state, mode, condense);
+    if (compressionState !== state || prepared !== snapshot || previewKey() !== key) return;
     snapshot.preview = preview;
-    snapshot.previewMode = mode;
+    snapshot.previewMode = key;
     sizeValue.textContent = kb(preview.bytes);
     sizeExactValue.textContent = AREX.formatByteCount(preview.bytes);
     tokensValue.textContent = '~' + AREX.formatTokenCount(preview.estimatedTokens) + ' tokens';
@@ -871,7 +899,7 @@ async function renderSizePreview() {
       savedValue.textContent = '−' + percent + '% from ' + kb(preview.baselineBytes);
     }
   } catch (error) {
-    if (compressionState !== state || prepared !== snapshot || compressionMode() !== mode) return;
+    if (compressionState !== state || prepared !== snapshot || previewKey() !== key) return;
     sizeValue.textContent = 'Unavailable';
     say('Could not calculate the preview: ' + String(error?.message || error), 'error');
   } finally {
@@ -931,15 +959,16 @@ function snapshotFilename(snapshot) {
 async function downloadPrepared() {
   if (downloading || preparing || !prepared) return;
   const state = compressionState;
-  if (!state || !prepared.preview || prepared.previewMode !== compressionMode()) return;
+  if (!state || !prepared.preview || prepared.previewMode !== previewKey()) return;
   downloading = true;
-  const snapshot = prepared, selectedMode = snapshot.previewMode;
+  const snapshot = prepared, selectedKey = snapshot.previewMode;
+  const selectedMode = compressionMode(), selectedCondense = condenseSelected(selectedMode);
   const filename = snapshotFilename(snapshot);
   updatePrimary();
   let url = null;
   try {
-    const markdown = await markdownForMode(state, selectedMode);
-    if (compressionState !== state || prepared !== snapshot || compressionMode() !== selectedMode) return;
+    const markdown = await markdownForMode(state, selectedMode, selectedCondense);
+    if (compressionState !== state || prepared !== snapshot || previewKey() !== selectedKey) return;
     const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
     const preview = snapshot.preview;
     preview.bytes = blob.size;
@@ -951,7 +980,7 @@ async function downloadPrepared() {
     const { messages = 0, expandedSpoilers = 0 } = snapshot.stats || {};
     const captured = snapshot.completedMessages ?? messages;
     const totalMsgs = snapshot.totalMessages ?? snapshot.stats?.totalMessages ?? null;
-    if (prepared === snapshot && compressionMode() === selectedMode) {
+    if (prepared === snapshot && previewKey() === selectedKey) {
       sizeValue.textContent = kb(blob.size);
       sizeExactValue.textContent = AREX.formatByteCount(blob.size);
     }
@@ -959,6 +988,7 @@ async function downloadPrepared() {
     if (preview.stats?.deduplicated) details.push(preview.stats.deduplicated + ' duplicate output(s) linked');
     if (preview.stats?.smartCompacted) details.push(preview.stats.smartCompacted + ' log block(s) compacted');
     if (preview.stats?.stubbed) details.push(preview.stats.stubbed + ' file output(s) with repeated lines referenced');
+    if (preview.stats?.thoughtsCondensed) details.push(preview.stats.thoughtsCondensed + ' reasoning section(s) condensed');
     const detailText = details.length ? '\n' + details.join(' · ') : '';
     if (preparedPartial) {
       say(
@@ -1191,6 +1221,11 @@ resnapshotBtn.addEventListener('click', () => {
 optCompress.addEventListener('change', () => {
   if (!optCompress.checked) activeMode = 'off';
   else if (activeMode === 'off') activeMode = 'lossless';
+  persistOptions();
+  updateCompressionControls();
+  if (prepared) void renderSizePreview();
+});
+optCondense.addEventListener('change', () => {
   persistOptions();
   updateCompressionControls();
   if (prepared) void renderSizePreview();

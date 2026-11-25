@@ -48,13 +48,23 @@ that tab stops the in-tab task.
     discard different file versions or non-overlapping ranges merely because the path matches.
     **Smart and Stubs are lossy**: Smart can still shorten unique long clean output.
   - **Off** — turn compression off to export the raw Markdown.
+- **Condense long reasoning** (default on; Smart and Stubs only) — shortens the middle of long
+  `Thought` sections. Smart keeps the first two and last two blocks of a Thought over 2,600 B with at
+  least five blocks; Stubs keeps the first and last block of a Thought over 900 B with at least three.
+  Middle blocks of at least 300 (Smart) or 250 (Stubs) characters become
+  `_[... condensed N intermediate reasoning blocks (M chars) ...]_`. In Stubs, fenced draft code in a
+  Thought that a later file write or artifact repeats is kept only once, and condensing never removes
+  a block that other markers point at. Your messages and the final assistant answers are never
+  changed, and Off/Lossless never touch reasoning, whatever the checkbox says. The choice is remembered; toggling it re-measures from the worker cache.
 
 Click **Prepare preview** to load the full history and expand spoilers as each window is processed. The popup then shows the
 exact UTF-8 Markdown size, an approximate token count, and savings against the raw export.
 Compression and token estimates run in a background Web Worker; switching between **Off / Lossless /
-Smart / Stubs** uses a per-snapshot cache after the first calculation. **Download Markdown** saves the
-selected prepared result without recompressing it or loading the Arena history again. The selected
-mode and options are remembered.
+Smart / Stubs** or toggling **Condense long reasoning** uses a per-snapshot cache after the first
+calculation. **Download Markdown** saves the selected prepared result without recompressing it or
+loading the Arena history again, then reports how many duplicate outputs were linked, log blocks
+compacted, file outputs referenced and reasoning sections condensed. The selected mode and options
+are remembered.
 
 The popup is strictly scoped to the active tab: it only shows the snapshot saved for that tab and
 conversation branch. On a non-Arena tab it shows a clean “open an Arena.ai agent conversation” state

@@ -68,7 +68,8 @@
   }
   .mode:disabled { opacity: .45; cursor: default; }
   #modeDescription { margin: 6px 2px 0; color: var(--secondary); font-size: 10.5px; line-height: 15px; }
-  #compression.disabled #modes, #compression.disabled #modeDescription { display: none; }
+  #compression .condense { margin-top: 4px; padding: 4px 2px 0; }
+  #compression.disabled #modes, #compression.disabled #modeDescription, #compression.disabled .condense { display: none; }
 
   .actions { display: grid; gap: 5px; }
   #export {
@@ -235,6 +236,9 @@
       <button class="mode" type="button" data-mode="stubs" aria-pressed="false">Stubs</button>
     </div>
     <p id="modeDescription">Exact duplicate outputs are kept once and replaced by links to the original block.</p>
+    <label class="opt condense"><input type="checkbox" id="condenseThoughts" checked>
+      <span><b>Condense long reasoning</b>
+      <small>Shortens long Thoughts. Smart and Stubs only.</small></span></label>
   </section>
 
   <div class="actions">
@@ -280,6 +284,7 @@
   <script src="../content/compress-framing.js"></script>
   <script src="../content/compress.js"></script>
   <script src="../content/compress-stubs.js"></script>
+  <script src="../content/compress-thoughts.js"></script>
   <script src="../shared/result-store.js"></script>
   <script src="popup.js"></script>
 </body>
