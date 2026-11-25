@@ -139,11 +139,85 @@ test('collapses exporter-opened spoilers after serialization and releases nested
     batchSize: 2,
   });
 
-  assert.equal(cleanup.closed, 3);
+  // One group click unmounts both nested children; they are pruned, not clicked.
+  assert.equal(cleanup.closed, 1);
+  assert.equal(cleanup.pruned, 2);
+  assert.equal(cleanup.total, 3);
+  assert.equal(progress.at(-1).pruned, 2);
   assert.equal(log.querySelectorAll('button[aria-expanded="true"]').length, 0);
   assert.equal(log.querySelectorAll('[style*="overflow: clip"]').length, 0);
   assert.equal(log.querySelector('#group').getAttribute('aria-expanded'), 'false');
   assert.ok(progress.length >= 2);
+});
+
+// Full group + many children, with a click counter per control so we can prove
+// cleanup removes the subtree with a single DOM click.
+function nestedGroupLog(childCount) {
+  const children = Array.from({ length: childCount }, (_, i) =>
+    '<div><button class="leaf" aria-expanded="false">used Bash ' + (i + 1) + 'ms</button></div>').join('');
+  const { document, AREX } = makeEnv({
+    html: '<div role="log"><div data-agent-transcript-message data-chat-message-id="grp">' +
+      '<div id="group-wrap"><button id="group" aria-expanded="false">Ran commands ' + childCount + '</button></div></div></div>',
+  });
+  const log = document.querySelector('[role="log"]');
+  const clicks = new Map();
+  const mount = (button, html, key) => button.addEventListener('click', () => {
+    clicks.set(key, (clicks.get(key) || 0) + 1);
+    if (button.getAttribute('aria-expanded') === 'true') {
+      button.setAttribute('aria-expanded', 'false');
+      button.parentElement.querySelector(':scope > [style*="overflow: clip"]')?.remove();
+      return;
+    }
+    button.setAttribute('aria-expanded', 'true');
+    const panel = document.createElement('div');
+    panel.setAttribute('style', 'overflow: clip; height: auto; opacity: 1');
+    panel.innerHTML = html;
+    button.parentElement.append(panel);
+    panel.querySelectorAll('button.leaf').forEach((leaf, i) => mount(leaf, '<pre>$ true</pre>', 'leaf-' + i));
+  });
+  mount(document.getElementById('group'), children, 'group');
+  return { AREX, log, clicks };
+}
+
+const totalClicks = clicks => [...clicks.values()].reduce((n, count) => n + count, 0);
+
+test('collapses a group of 1 parent + 80 children in one click with zero leaked panels', async () => {
+  const { AREX, log, clicks } = nestedGroupLog(80);
+  const expanded = await AREX.expandAllSpoilers(log);
+  assert.equal(expanded.expanded, 81);
+  assert.equal(expanded.openedButtons.length, 81);
+  assert.equal(log.querySelectorAll('button[aria-expanded="false"]').length, 0);
+  const clicksAfterExpand = totalClicks(clicks);
+  assert.equal(clicksAfterExpand, 81);
+
+  const progress = [];
+  const cleanup = await AREX.collapseOpenedSpoilers(expanded.openedButtons, {
+    onProgress: event => progress.push(event), batchSize: 25,
+  });
+
+  assert.equal(cleanup.closed, 1);
+  assert.equal(cleanup.pruned, 80);
+  assert.equal(cleanup.total, 81);
+  assert.equal(totalClicks(clicks), clicksAfterExpand + 1);
+  assert.equal(progress.at(-1).closed, 1);
+  assert.equal(progress.at(-1).pruned, 80);
+  assert.equal(log.querySelectorAll('button[aria-expanded="true"]').length, 0);
+  assert.equal(log.querySelectorAll('[style*="overflow: clip"]').length, 0);
+});
+
+test('expander records capped stuck-spoiler diagnostics', async () => {
+  const buttons = Array.from({ length: 5 }, (_, i) =>
+    '<button aria-expanded="false">frozen ' + (i + 1) + '</button>').join('');
+  const { document, AREX } = makeEnv({
+    html: '<div role="log"><div data-agent-transcript-message data-chat-message-id="frozen-turn">' + buttons + '</div></div>',
+  });
+  const result = await AREX.expandAllSpoilers(document.querySelector('[role="log"]'), {
+    maxPasses: 2, stuckSampleLimit: 2,
+  });
+  assert.equal(result.stuck.length, 5);
+  assert.equal(result.stuckSamples.length, 2);
+  assert.equal(result.stuckSamples[0].messageId, 'frozen-turn');
+  assert.match(result.stuckSamples[0].header, /frozen 1/);
 });
 
 test('expander opens large batches incrementally and yields between them', async () => {

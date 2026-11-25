@@ -3,9 +3,30 @@ window.AREX = window.AREX || {};
 
 AREX.sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Wait for quiet DOM changes, with an absolute cap. Windowed processing can
-// ignore attribute-only animation churn; both timers are always released.
-AREX.settle = (root, { quietMs = 250, maxMs = 3000, attributes = true } = {}) =>
+// Streaming token appends and animation timers mutate the message body forever
+// on an active branch. They are not what `settle` waits for: only structural
+// changes that can mount/unmount a spoiler (or any non-streaming subtree)
+// should postpone the quiet timer. Both timers are always released.
+AREX._isStreamingMutation = record => {
+  const el = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+  if (!el) return true;
+  if (el.closest(AREX.S.LOADER) || el.closest('[aria-live], [role="status"], .animate-pulse')) return true;
+  const prose = el.closest(AREX.S.PROSE);
+  if (!prose) return false;
+  if (record.type === 'characterData' || record.type === 'attributes') return true;
+  const nodes = [...record.addedNodes, ...record.removedNodes];
+  // Text-only prose churn (tokens, cursor, syntax highlighting) is streamed
+  // content; element/panel mounts still count as real DOM work.
+  return nodes.length > 0 && nodes.every(node =>
+    node.nodeType === 3 || (node.nodeType === 1 &&
+      !node.matches(AREX.S.EXPANDABLE) && !node.matches(AREX.S.PANEL) &&
+      !node.querySelector?.(AREX.S.EXPANDABLE) && !node.querySelector?.(AREX.S.PANEL))
+  );
+};
+
+// Wait for quiet DOM changes, with an absolute cap. `ignorePredicate` can add
+// caller-specific filters (the built-in streaming filter always applies).
+AREX.settle = (root, { quietMs = 250, maxMs = 3000, attributes = true, ignorePredicate } = {}) =>
   new Promise(resolve => {
     let done = false, quietTimer, maxTimer;
     const finish = () => {
@@ -13,8 +34,14 @@ AREX.settle = (root, { quietMs = 250, maxMs = 3000, attributes = true } = {}) =>
       done = true;
       clearTimeout(quietTimer); clearTimeout(maxTimer); obs.disconnect(); resolve();
     };
-    const obs = new MutationObserver(() => { clearTimeout(quietTimer); quietTimer = setTimeout(finish, quietMs); });
-    obs.observe(root, { childList: true, subtree: true, attributes });
+    const ignored = record =>
+      (typeof ignorePredicate === 'function' && ignorePredicate(record, root) === true) ||
+      AREX._isStreamingMutation(record) === true;
+    const obs = new MutationObserver(records => {
+      if (records.every(ignored)) return;
+      clearTimeout(quietTimer); quietTimer = setTimeout(finish, quietMs);
+    });
+    obs.observe(root, { childList: true, subtree: true, attributes, characterData: true });
     quietTimer = setTimeout(finish, quietMs);
     maxTimer = setTimeout(finish, maxMs);
   });
@@ -115,9 +142,45 @@ AREX.chatUuid = () =>
   (typeof location !== 'undefined' && location.pathname.match(/\/agent\/([^/]+)/)?.[1]) || null;
 
 // Titles rendered twice adjacent (button + tooltip with no separator) collapse to X+X -> X.
+// KMP prefix function finds the shortest period in O(N), with no regex backtracking.
+// As with the previous `/^(.+?)\1+$/u`, a unit shorter than 3 chars is kept as-is.
 AREX.dedupeTitle = t => {
-  const m = String(t).match(/^(.+?)\1+$/u);
-  return (m && m[1].length >= 3 ? m[1] : String(t)).trim();
+  const s = String(t ?? '');
+  const n = s.length;
+  if (n < 6) return s.trim();
+  // `.` in the old regex did not match JS line terminators.
+  for (let i = 0; i < n; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c === 10 || c === 13 || c === 0x2028 || c === 0x2029) return s.trim();
+  }
+  const pi = new Uint32Array(n);
+  for (let i = 1; i < n; i += 1) {
+    let j = pi[i - 1];
+    while (j > 0 && s.charCodeAt(i) !== s.charCodeAt(j)) j = pi[j - 1];
+    if (s.charCodeAt(i) === s.charCodeAt(j)) j += 1;
+    pi[i] = j;
+  }
+  const period = n - pi[n - 1];
+  const unit = period < n && n % period === 0 ? s.slice(0, period) : '';
+  return (unit.length >= 3 ? unit : s).trim();
+};
+
+// Exact UTF-8 byte count without allocating an encoded copy. Unpaired
+// surrogates become U+FFFD (3 bytes), exactly like TextEncoder.encode().
+AREX.utf8ByteLength = value => {
+  const s = String(value ?? '');
+  let bytes = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const code = s.charCodeAt(i);
+    if (code < 0x80) bytes += 1;
+    else if (code < 0x800) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = s.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) { bytes += 4; i += 1; }
+      else bytes += 3; // lone high surrogate -> U+FFFD
+    } else bytes += 3; // lone low surrogate -> U+FFFD, BMP -> 3 bytes
+  }
+  return bytes;
 };
 
 // Branch title: topbar holds it (possibly duplicated in a tooltip); first line only.
