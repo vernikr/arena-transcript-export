@@ -82,3 +82,61 @@ test('includeToolActivity=false drops spoilers but keeps prose', () => {
   assert.ok(!/^#### used Bash/m.test(plain));
   assert.match(plain, /^### Итог работы/m);
 });
+
+// Real Arena panels use a shared flex container for several cards and may
+// append further output chunks directly or in single-pre wrappers.
+test('Bash continuation chunks keep their stream labels in both serializers', async () => {
+  const chunk1 = 'A'.repeat(10240) + ' end';
+  const chunk2 = 'B'.repeat(10240) + ' tail';
+  const html = `<div role="log"><div data-agent-transcript-message data-chat-message-id="chunks">
+    <div><button aria-expanded="true">Used Bash 100ms</button><div style="overflow: clip">
+      <div class="flex flex-col gap-2">
+        <div class="bg-surface-secondary"><div><span>command</span></div><div><pre>$ make</pre></div></div>
+        <div class="bg-surface-secondary"><div><span>stdout</span></div><div><pre>start</pre></div></div>
+        <pre>${chunk1}</pre><div><div><pre>${chunk2}</pre></div></div>
+        <div class="bg-surface-secondary"><div><span>stderr</span></div><div><pre>warning</pre></div></div>
+        <pre>stderr continuation</pre>
+        <div class="bg-surface-secondary"><div><span>command</span></div><div><pre>$ next</pre></div></div>
+        <pre>not a command</pre>
+      </div>
+    </div></div></div></div>`;
+  const { AREX, document, dom } = makeEnv({ html });
+  const message = AREX.messages(document.querySelector('[role=log]'))[0];
+  const expected = '## 🤖 Assistant\n\n#### Used Bash 100ms\n\n'
+    + '**command:**\n\n```bash\n$ make\n```\n\n'
+    + '**stdout:**\n\n```text\nstart\n```\n\n'
+    + `**stdout:**\n\n\`\`\`text\n${chunk1}\n\`\`\`\n\n`
+    + `**stdout:**\n\n\`\`\`text\n${chunk2}\n\`\`\`\n\n`
+    + '**stderr:**\n\n```text\nwarning\n```\n\n'
+    + '**stderr:**\n\n```text\nstderr continuation\n```\n\n'
+    + '**command:**\n\n```bash\n$ next\n```\n\n```text\nnot a command\n```';
+  assert.equal(AREX.serializeMessage(message), expected);
+  assert.equal(await AREX.serializeMessageAsync(message, {}, 0), expected);
+  assert.ok(AREX.serialize(AREX.logEl()).endsWith(expected + '\n'));
+  dom.window.close();
+});
+
+test('labels do not leak across siblings, non-Bash panels, or intervening content', async () => {
+  const html = `<div role="log"><div data-agent-transcript-message data-chat-message-id="scope">
+    <div><button aria-expanded="true">Used Bash</button><div style="overflow: clip"><div>
+      <div><span>command</span><pre>$ test</pre></div><pre>orphan</pre>
+      <div><span>stdout</span><pre>first</pre></div><div>interruption</div><pre>after interruption</pre>
+      <div><span>stdout</span><pre>contains <span>command</span> here</pre><pre>same card</pre></div>
+    </div></div></div>
+    <div><button aria-expanded="true">Other tool</button><div style="overflow: clip"><div>
+      <div><span>stdout</span><pre>other output</pre></div><pre>other orphan</pre>
+    </div></div></div>
+    <pre>outside</pre>
+  </div></div>`;
+  const { AREX, document, dom } = makeEnv({ html });
+  const message = AREX.messages(document.querySelector('[role=log]'))[0];
+  const sync = AREX.serializeMessage(message);
+  assert.equal(await AREX.serializeMessageAsync(message, {}, 0), sync);
+  assert.match(sync, /\*\*command:\*\*\n\n```bash\n\$ test\n```\n\n```text\norphan\n```/);
+  assert.match(sync, /```text\nafter interruption\n```/);
+  assert.doesNotMatch(sync, /\*\*(?:stdout|command):\*\*\n\n```(?:text|bash)\nafter interruption/);
+  assert.match(sync, /\*\*stdout:\*\*\n\n```text\nsame card\n```/);
+  assert.match(sync, /\*\*stdout:\*\*\n\n```text\nother output\n```\n\n```text\nother orphan\n```/);
+  assert.doesNotMatch(sync, /\*\*(?:stdout|stderr|command):\*\*\n\n```(?:text|bash)\noutside/);
+  dom.window.close();
+});
