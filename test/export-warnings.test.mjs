@@ -31,3 +31,26 @@ test('no warnings and no expansion when tool activity is opted out', async () =>
   assert.equal(expandCalls, 0);
   assert.equal(result.warnings.length, 0); // vm-realm array: structural deepEqual would be cross-realm
 });
+
+test('appended messages are reported as a warning while the initial snapshot completes', async () => {
+  const { AREX, document } = makeEnv({ html: `<div role="log">
+    <div data-agent-transcript-message data-chat-message-id="m1">first</div>
+    <div data-agent-transcript-message data-chat-message-id="m2">second</div>
+  </div>` });
+  const log = document.querySelector('[role="log"]');
+  AREX.loadFullHistory = async () => ({ messages: 2, stable: true, pages: 0 });
+  AREX.expandAllSpoilers = async () => ({ expanded: 0, stuck: [] });
+  AREX.serializeMessageAsync = async message => {
+    if (message.getAttribute('data-chat-message-id') === 'm1') {
+      const appended = document.createElement('div');
+      appended.setAttribute('data-agent-transcript-message', '');
+      appended.setAttribute('data-chat-message-id', 'm3');
+      appended.textContent = 'new turn';
+      log.append(appended);
+    }
+    return message.textContent;
+  };
+  const result = await AREX.runExport({ includeToolActivity: false });
+  assert.ok(result.warnings.some(warning => /New messages appeared during export; exported initial 2 messages/.test(warning)));
+  assert.equal(result.stats.messages, 2);
+});

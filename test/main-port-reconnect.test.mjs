@@ -230,3 +230,166 @@ test('an error produced while disconnected is sent after reconnection', async ()
   assert.equal(AREX._job.errorDelivered, true);
   dom.window.close();
 });
+
+test('stopping after two serialized messages delivers a partial result after spoiler cleanup', async () => {
+  const dom = makeDom();
+  const chromeMock = installChromeMock(dom.window);
+  const AREX = loadContentScripts(dom);
+  const log = dom.window.document.querySelector('[role="log"]');
+  for (let i = 1; i <= 5; i += 1) {
+    const message = dom.window.document.createElement('div');
+    message.setAttribute('data-agent-transcript-message', '');
+    message.setAttribute('data-chat-message-id', `m${i}`);
+    log.append(message);
+  }
+  AREX.logEl = () => log;
+  AREX.waitFor = async () => log;
+  AREX.loadFullHistory = async () => ({ stable: true, messages: 5, pages: 0 });
+  AREX.chatTitle = () => 'Partial test';
+  AREX.slug = () => 'partial-test';
+  AREX.stamp = () => '20261125-1200';
+  AREX.serializeHeader = () => '# Captured transcript';
+  let thirdStarted;
+  let thirdHasStarted = false;
+  const thirdStart = new Promise(resolve => { thirdStarted = () => { thirdHasStarted = true; resolve(); }; });
+  let continueThird;
+  const continuePromise = new Promise(resolve => { continueThird = resolve; });
+  let serialized = 0;
+  AREX.serializeMessageAsync = async message => {
+    serialized += 1;
+    if (serialized === 3) {
+      thirdStarted();
+      await continuePromise;
+      AREX.throwIfAborted();
+    }
+    return `Message ${message.getAttribute('data-chat-message-id')}`;
+  };
+  const opened = { isConnected: true, getAttribute: () => 'true', click() {} };
+  let cleanup = false;
+  AREX.expandAllSpoilers = async (_log, { openedButtons }) => {
+    openedButtons.push(opened);
+    return { expanded: 1, stuck: [] };
+  };
+  AREX.collapseOpenedSpoilers = async (_buttons, { onProgress }) => {
+    cleanup = true;
+    onProgress?.({ closed: 1, total: 1 });
+    return { closed: 1 };
+  };
+
+  let response;
+  chromeMock.messageListener({ type: 'AREX_EXPORT_START', options: {} }, null, value => { response = value; });
+  assert.equal(response.ok, true);
+  try { await waitUntil(() => thirdHasStarted || AREX._job.status === 'error'); }
+  catch { assert.fail(`third serialize timeout: status=${AREX._job.status}, error=${AREX._job.error}, progress=${JSON.stringify(AREX._job.progress)}`); }
+  assert.equal(AREX._job.status, 'running', AREX._job.error || 'third serialization was never reached');
+  chromeMock.messageListener({ type: 'AREX_EXPORT_CANCEL' }, null, value => assert.equal(value.ok, true));
+  continueThird();
+  await waitUntil(() => AREX._job.status === 'done' || AREX._job.status === 'error');
+  assert.equal(AREX._job.status, 'done', AREX._job.error || 'partial export did not finish');
+
+  assert.equal(cleanup, true);
+  assert.equal(AREX._job.result.partial, true);
+  assert.equal(AREX._job.result.completedMessages, 2);
+  assert.match(AREX._job.result.markdown, /Status: Partial export \(stopped at 2\/5 messages\)/);
+  assert.match(AREX._job.result.markdown, /Message m1[\s\S]*Message m2/);
+  assert.doesNotMatch(AREX._job.result.markdown, /Message m3/);
+  const end = chromeMock.jobPort.sent.find(message => message.type === 'AREX_RESULT_END');
+  assert.equal(end.ok, true);
+  assert.equal(end.partial, true);
+  assert.equal(end.completedMessages, 2);
+  assert.ok(chromeMock.jobPort.sent.some(message => message.type === 'AREX_PROGRESS' && message.stage === 'cleanup'));
+  dom.window.close();
+});
+
+test('AREX_DUMP_LOG returns a live profiler snapshot while history loading is blocked', async () => {
+  const dom = makeDom();
+  const chromeMock = installChromeMock(dom.window);
+  const AREX = loadContentScripts(dom);
+  const log = dom.window.document.querySelector('[role="log"]');
+  stubFastExport(AREX, log);
+  let enterHistory;
+  const inHistory = new Promise(resolve => { enterHistory = resolve; });
+  let finishHistory;
+  const finish = new Promise(resolve => { finishHistory = resolve; });
+  AREX.loadFullHistory = async (_log, { onProgress }) => {
+    onProgress({ stage: 'history', phase: 'page', pages: 1 });
+    enterHistory();
+    await finish;
+    return { stable: true, messages: 1, pages: 0 };
+  };
+  const running = AREX.runExport();
+  await inHistory;
+  let runtimeReply;
+  chromeMock.messageListener({ type: 'AREX_DUMP_LOG' }, null, value => { runtimeReply = value; });
+  assert.equal(runtimeReply.ok, true);
+  assert.equal(runtimeReply.status, 'running');
+  assert.equal(runtimeReply.profile.profileVersion, 2);
+  assert.equal(runtimeReply.profile.outcome, 'running');
+  assert.ok(runtimeReply.progress.some(event => event.stage === 'history'));
+
+  await chromeMock.jobPort.emit({ type: 'AREX_DUMP_LOG', requestId: 'log-1' });
+  const portReply = chromeMock.jobPort.sent.find(message => message.type === 'AREX_DUMP_LOG_RESULT');
+  assert.equal(portReply.requestId, 'log-1');
+  assert.equal(portReply.profile.profileVersion, 2);
+  finishHistory();
+  await running;
+  dom.window.close();
+});
+
+test('streaming tail remount by stable id and newly appended message do not abort the initial snapshot', async () => {
+  const dom = makeDom();
+  const AREX = loadContentScripts(dom);
+  const log = dom.window.document.querySelector('[role="log"]');
+  const addMessage = (id, text) => {
+    const message = dom.window.document.createElement('div');
+    message.setAttribute('data-agent-transcript-message', '');
+    message.setAttribute('data-chat-message-id', id);
+    message.textContent = text;
+    log.append(message);
+    return message;
+  };
+  addMessage('first', 'first');
+  const tail = addMessage('tail', 'old tail');
+  AREX.serializeHeader = () => '# Header';
+  AREX.expandAllSpoilers = async () => ({ expanded: 0, stuck: [] });
+  AREX.yieldToMain = async () => {};
+  let didReplace = false;
+  AREX.serializeMessageAsync = async message => {
+    if (!didReplace) {
+      didReplace = true;
+      const replacement = dom.window.document.createElement('div');
+      replacement.setAttribute('data-agent-transcript-message', '');
+      replacement.setAttribute('data-chat-message-id', 'tail');
+      replacement.textContent = 'remounted tail';
+      tail.replaceWith(replacement);
+      addMessage('new-turn', 'newly appended');
+    }
+    return message.textContent;
+  };
+  const result = await AREX.processMessagesInWindows(log, { includeToolActivity: false }, { windowSize: 1 });
+  assert.match(result.markdown, /remounted tail/);
+  assert.equal(result.totalMessages, 2);
+  assert.ok(result.warnings.some(warning => /New messages appeared during export/.test(warning)));
+  dom.window.close();
+});
+
+test('large chunk transfer yields cooperatively, reports saving progress and keeps heartbeat until ACK', async () => {
+  const dom = makeDom();
+  const chromeMock = installChromeMock(dom.window);
+  const AREX = loadContentScripts(dom);
+  const log = dom.window.document.querySelector('[role="log"]');
+  stubFastExport(AREX, log);
+  const largeSegment = 'x'.repeat(2 * 2 * 1024 * 1024 + 37);
+  AREX.serializeMessageAsync = async () => largeSegment;
+  let yields = 0;
+  AREX.yieldToMain = async () => { yields += 1; };
+  await AREX.runExport();
+  const chunks = chromeMock.jobPort.sent.filter(message => message.type === 'AREX_RESULT_CHUNK');
+  assert.equal(chunks.length, 3);
+  assert.equal(yields, 1);
+  assert.ok(chromeMock.jobPort.sent.some(message => message.type === 'AREX_PROGRESS' && message.stage === 'saving' && message.sentChunks === 2));
+  assert.ok(AREX._heartbeatTimer, 'heartbeat remains live while the result awaits durable ACK');
+  await chromeMock.jobPort.emit({ type: 'AREX_RESULT_ACK' });
+  assert.equal(AREX._heartbeatTimer, null);
+  dom.window.close();
+});

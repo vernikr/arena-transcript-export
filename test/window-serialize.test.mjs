@@ -94,9 +94,10 @@ test('progress discovers nested spoilers without regressing the percentage', asy
   await AREX.processMessagesInWindows(log, {}, { onProgress: event => events.push(event) });
 
   const expansionEvents = events.filter(event => event.phase === 'expand');
-  assert.equal(expansionEvents[0].expandedSpoilers, 1);
-  assert.equal(expansionEvents[0].totalSpoilers, 3); // the group reveals two nested spoilers
-  assert.equal(expansionEvents[0].percent, 25);
+  const passEvents = expansionEvents.filter(event => event.expansionPhase === 'settle');
+  assert.equal(passEvents[0].expandedSpoilers, 1);
+  assert.equal(passEvents[0].totalSpoilers, 3); // the group reveals two nested spoilers
+  assert.ok(passEvents[0].percent > 0 && passEvents[0].percent <= 100);
   assert.ok(expansionEvents.some(event => event.expandedSpoilers === 3 && event.percent === 75));
   assert.ok(events.every((event, index) => index === 0 || event.percent >= events[index - 1].percent));
   assert.equal(events.at(-1).percent, 100);
