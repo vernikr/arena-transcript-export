@@ -39,25 +39,55 @@ test('popup ignores stale worker replies, caches modes and downloads the selecte
   let downloads = 0, blob;
   w.URL.createObjectURL = value => { blob = value; return 'blob:test'; };
   w.URL.revokeObjectURL = () => {};
+  // The popup only ever loads the snapshot scoped to the active Arena tab.
+  let lastPopupMessage = null;
+  let onPopupMessage = null;
   w.chrome = {
     storage: { local: { set() {} }, sync: { get(defaults, cb) { cb(defaults); }, set() {} } },
-    runtime: { sendMessage: async () => {}, connect: () => ({ onDisconnect: { addListener() {} }, onMessage: { addListener() {} }, postMessage() {} }) },
-    tabs: { query: async () => [] }, downloads: { download: async () => { downloads++; return 1; } },
+    runtime: { sendMessage: async () => {}, connect: () => ({
+      onDisconnect: { addListener() {} },
+      onMessage: { addListener(listener) { onPopupMessage = listener; } },
+      postMessage(message) {
+        lastPopupMessage = message;
+        if (message.type === 'AREX_HELLO') {
+          queueMicrotask(() => onPopupMessage({ type: 'AREX_STATUS', job: null }));
+        }
+      },
+    }) },
+    tabs: { query: async () => [{ id: 1, url: 'https://arena.ai/agent/x' }] },
+    downloads: { download: async () => { downloads++; return 1; }, onChanged: { addListener() {}, removeListener() {} } },
   };
-  w.AREX_RESULT_STORE = { load: async () => ({ markdown: 'original', filename: 'x.md', stats: { messages: 1, expandedSpoilers: 0 }, warnings: [] }) };
+  const snapshot = { markdown: 'original', filename: 'x.md', stats: { messages: 1, expandedSpoilers: 0 }, warnings: [], createdAt: 1 };
+  w.AREX_RESULT_STORE = {
+    loadForTab: async (tabId, chatUuid) => (tabId === 1 && chatUuid === 'x' ? snapshot : null),
+    loadMetaForTab: async () => ({ filename: 'x.md', partial: false }),
+    loadDiagnosticLog: async () => null,
+    loadProfile: async () => null,
+    load: async () => snapshot,
+  };
   class FakeWorker {
     constructor() { this.requests = []; workers.push(this); }
     postMessage(message) {
       this.requests.push(message);
-      if (message.type !== 'GET_MODE') return;
       const mode = message.mode;
       const delay = mode === 'smart' ? 60 : 8;
+      if (message.type === 'GET_MARKDOWN') {
+        setTimeout(() => {
+          if (this.terminated) return;
+          const text = mode + ' result';
+          this.onmessage({ data: { type: 'MARKDOWN_RESULT', snapshotId: message.snapshotId, requestId: message.requestId, mode, markdown: text } });
+        }, delay);
+        return;
+      }
+      if (message.type !== 'GET_MODE') return;
       setTimeout(() => {
         if (this.terminated) return;
         const text = mode + ' result';
-        this.onmessage({ data: { type: 'MODE_RESULT', snapshotId: message.snapshotId, requestId: message.requestId,
-          result: { markdown: text, bytes: text.length, baselineBytes: 100, savedBytes: 100 - text.length,
-            savedRatio: (100 - text.length) / 100, estimatedTokens: 2, stats: { deduplicated: 0, smartCompacted: 0, stubbed: 0 } } } });
+        // Mode previews never carry the multi-megabyte Markdown string.
+        const result = { bytes: text.length, baselineBytes: 100, savedBytes: 100 - text.length,
+          savedRatio: (100 - text.length) / 100, estimatedTokens: 2, stats: { deduplicated: 0, smartCompacted: 0, stubbed: 0 } };
+        if (message.includeMarkdown !== false) result.markdown = text;
+        this.onmessage({ data: { type: 'MODE_RESULT', snapshotId: message.snapshotId, requestId: message.requestId, result } });
       }, delay);
     }
     terminate() { this.terminated = true; }
@@ -69,9 +99,11 @@ test('popup ignores stale worker replies, caches modes and downloads the selecte
   w.AREX.compressIndex = () => { throw new Error('unexpected UI-thread compression'); };
   w.AREX.compressMarkdown = () => { throw new Error('unexpected recompression on download'); };
   vm.runInContext(read('popup/popup.js'), ctx);
-  await waitUntil(() => $('#sizeExactValue').textContent);
+  await waitUntil(() => $('#sizeExactValue').textContent, 3000);
   assert.equal(workers.length, 1);
   assert.equal(workers[0].requests.filter(x => x.type === 'INIT_SNAPSHOT').length, 1);
+  assert.ok(workers[0].requests.filter(x => x.type === 'GET_MODE').every(x => x.includeMarkdown === false),
+    'mode previews request metadata only');
   $('[data-mode="smart"]').click();
   assert.equal($('#export').disabled, true);
   $('[data-mode="stubs"]').click();

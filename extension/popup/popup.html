@@ -10,6 +10,8 @@
     --accent: #1a73e8;     --accent-hover: #1765cc; --accent-active: #1a5bc7;
     --on-accent: #ffffff;  --disabled-bg: #e4e6e8;  --disabled-fg: #9aa0a6;
     --error: #d93025;      --warn: #b26a00;         --ok: #188038;
+    --amber: #b26a00;      --amber-border: #e8b64c; --amber-bg: #fef7e0;
+    --link: #1a73e8;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -18,6 +20,8 @@
       --accent: #8ab4f8;   --accent-hover: #a6c4fa; --accent-active: #b3ccfb;
       --on-accent: #202124; --disabled-bg: #3c4043;  --disabled-fg: #80868b;
       --error: #f28b82;    --warn: #fdd663;         --ok: #81c995;
+      --amber: #e37400;    --amber-border: #8a6116; --amber-bg: #3a3320;
+      --link: #8ab4f8;
     }
   }
   * { box-sizing: border-box; }
@@ -36,13 +40,22 @@
   label.opt b { font-weight: 500; display: block; }
   label.opt small { display: block; color: var(--secondary); font-size: 11px; line-height: 16px; }
   label.opt:has(input:disabled) { opacity: .55; cursor: default; }
+  #singleTabNotice[hidden] { display: none; }
+  #singleTabNotice {
+    margin: 2px 0 8px; padding: 9px 11px;
+    border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 7%, var(--track));
+    color: var(--fg); font-size: 11.5px; line-height: 17px;
+  }
+  #singleTabNotice small { display: block; margin-top: 3px; color: var(--secondary); font-size: 11px; line-height: 16px; }
 
   #compression {
     margin-top: 5px; padding: 8px 9px 9px;
     border: 1px solid var(--border); border-radius: 9px;
     background: color-mix(in srgb, var(--track) 48%, transparent);
   }
-  #modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 8px; }
+  #compression[hidden] { display: none; }
+  #modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 8px; }
   .mode {
     min-width: 0; padding: 6px 3px; border: 1px solid transparent; border-radius: 7px;
     color: var(--secondary); background: transparent; font: inherit; font-size: 11px;
@@ -81,7 +94,18 @@
   #cancel:hover:not(:disabled) { background: color-mix(in srgb, var(--error) 10%, transparent); }
   #cancel:disabled { opacity: .6; cursor: default; }
   #cancel[hidden] { display: none; }
-  #export:focus-visible, #resnapshot:focus-visible, #cancel:focus-visible, label.opt:focus-within, .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #export:focus-visible, #resnapshot:focus-visible, #cancel:focus-visible, #exportLog:focus-visible, label.opt:focus-within, .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #partialCallout[hidden] { display: none; }
+  #partialCallout {
+    display: flex; align-items: flex-start; gap: 8px;
+    margin-top: 10px; padding: 8px 10px;
+    border: 1px solid var(--amber-border); border-left: 3px solid var(--amber); border-radius: 8px;
+    background: var(--amber-bg); color: var(--fg); font-size: 11.5px; line-height: 16px;
+  }
+  #partialCallout .pause { color: var(--amber); font-weight: 700; font-size: 15px; line-height: 16px; flex: 0 0 auto; }
+  #partialCallout b { font-weight: 500; display: block; }
+  #partialCallout small { display: block; color: var(--secondary); font-size: 10.5px; line-height: 15px; }
 
   #sizePreview {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -120,11 +144,34 @@
     transition: width .35s ease;
   }
 
-  #profileCard { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--track); }
-  #profileCard[hidden] { display: none; }
+  details#diagnostics { margin-top: 10px; }
+  details#diagnostics[hidden] { display: none; }
+  details#diagnostics > summary {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px; list-style: none;
+    border: 1px solid var(--border); border-radius: 8px; background: transparent;
+    color: var(--fg); font: inherit; font-size: 11.5px; cursor: pointer; user-select: none;
+  }
+  details#diagnostics > summary::-webkit-details-marker { display: none; }
+  details#diagnostics > summary::marker { content: ''; }
+  details#diagnostics > summary .chevron { color: var(--secondary); font-size: 10px; transition: transform .12s; }
+  details#diagnostics[open] > summary .chevron { transform: rotate(90deg); }
+  details#diagnostics > summary:hover { background: var(--track); }
+  details#diagnostics > summary .hint { margin-left: auto; color: var(--secondary); font-size: 10.5px; }
+  #diagnosticsBody { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--track); }
   #profileSummary { color: var(--secondary); font-size: 11px; line-height: 16px; white-space: pre-wrap; font-variant-numeric: tabular-nums; }
-  #profileDownload { min-height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--fg); font: inherit; font-size: 11.5px; cursor: pointer; align-self: flex-start; }
-  #profileDownload:hover { background: var(--bg); }
+  #profileSummary:empty { display: none; }
+  #logNotice {
+    padding: 0 2px; color: var(--secondary); font-size: 10.5px; line-height: 15px;
+  }
+  #logNotice:empty { display: none; }
+  #profileDownload, #exportLog {
+    min-height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px;
+    background: transparent; color: var(--fg); font: inherit; font-size: 11.5px; cursor: pointer;
+    align-self: flex-start;
+  }
+  #profileDownload:hover, #exportLog:hover { background: var(--bg); }
+  #exportLog { border-color: var(--accent); color: var(--link); }
+  #exportLog:disabled { opacity: .6; cursor: default; }
 
   #progress { margin-top: 10px; }
   ul#log {
@@ -162,6 +209,11 @@
     <button id="backgroundJobSwitch" type="button">Switch</button>
   </div>
 
+  <div id="singleTabNotice" hidden role="status">
+    <b>Open an Arena.ai agent conversation to export it.</b>
+    <small>This tab has no exportable transcript; snapshots from other tabs are never shown here. Use the Switch button above if another Arena tab is scanning.</small>
+  </div>
+
   <label class="opt"><input type="checkbox" id="includeToolActivity" checked>
     <span><b>Expand &amp; include tool activity</b>
     <small>Reasoning blocks, command runs, edits — all spoilers, incl. nested.</small></span></label>
@@ -172,11 +224,12 @@
     <span><b>Performance profiling</b>
     <small>Detailed timing of the export; saved with the snapshot.</small></span></label>
 
-  <section id="compression">
+  <section id="compression" hidden>
     <label class="opt"><input type="checkbox" id="compressHistory" checked>
       <span><b>Compress history</b>
       <small>Reduce repeated tool output and verbose command logs.</small></span></label>
     <div id="modes" role="group" aria-label="Compression mode">
+      <button class="mode" type="button" data-mode="off" aria-pressed="false">Off</button>
       <button class="mode" type="button" data-mode="lossless" aria-pressed="true">Lossless</button>
       <button class="mode" type="button" data-mode="smart" aria-pressed="false">Smart</button>
       <button class="mode" type="button" data-mode="stubs" aria-pressed="false">Stubs</button>
@@ -186,9 +239,16 @@
 
   <div class="actions">
     <button id="export">Prepare preview</button>
-    <button id="cancel" type="button" hidden>Cancel export</button>
+    <button id="cancel" type="button" hidden>Stop &amp; keep partial</button>
     <button id="resnapshot" type="button" hidden>Retake snapshot</button>
   </div>
+  <section id="partialCallout" hidden role="status">
+    <span class="pause" aria-hidden="true">‖</span>
+    <div>
+      <b id="partialTitle">Partial snapshot</b>
+      <small id="partialDetail">Stopped before the branch finished; download keeps the captured messages.</small>
+    </div>
+  </section>
   <div id="progressBar" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Export progress"><div id="progressFill"></div></div>
   <section id="sizePreview" hidden aria-live="polite">
     <div>
@@ -201,11 +261,21 @@
       <div id="savedValue"></div>
     </div>
   </section>
-  <section id="profileCard" hidden aria-live="polite">
-    <div id="profileSummary"></div>
-    <button id="profileDownload" type="button">Download profile (JSON)</button>
-  </section>
-  <section id="progress" hidden><ul id="log"></ul><div id="status"></div></section>
+  <details id="diagnostics">
+    <summary>
+      <span class="chevron" aria-hidden="true">▶</span>
+      <span>Log &amp; diagnostics</span>
+      <span class="hint" id="diagnosticsHint"></span>
+    </summary>
+    <div id="diagnosticsBody">
+      <div id="profileSummary"></div>
+      <button id="profileDownload" type="button" hidden>Download profile (JSON)</button>
+      <button id="exportLog" type="button">Export log (JSON)</button>
+      <p id="logNotice">Timestamped stage log, job and transfer diagnostics; the profiler summary is included when profiling is on.</p>
+    </div>
+  </details>
+  <section id="progress" hidden><ul id="log"></ul></section>
+  <div id="status" aria-live="polite"></div>
   <script src="../content/compress.js"></script>
   <script src="../shared/result-store.js"></script>
   <script src="popup.js"></script>

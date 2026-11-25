@@ -118,7 +118,28 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   deliberately lightweight and is not a model-specific tokenizer.
 - Each stage has a monotonicity guard: output cannot exceed the previous mode in UTF-8 bytes.
 - The latest raw snapshot is persisted in extension IndexedDB, outside the popup's short-lived
-  JavaScript memory. Reopening the popup restores it; the user can download again or retake it.
+  JavaScript memory, and keyed by `(tabId, chatUuid)` — never a global "latest". The popup queries
+  `activeArenaTab()` first; a non-Arena tab gets a clean empty state (plus a banner for a job in
+  another tab), and an Arena tab loads only `AREX_RESULT_STORE.loadForTab(tabId, chatUuid)` and the
+  matching scoped diagnostic record. Opening the popup on another branch never shows the previous
+  branch's size card, profile or download button. Reopening the popup restores the scoped snapshot;
+  the user can download again or retake it.
+- A stopped scan (`job.status === 'stopped'`, `snapshot.partial === true`) is a first-class preview:
+  an amber callout reports `K of N messages captured before stop`, all compression modes stay
+  switchable, the primary button becomes **Download Partial Markdown** (filename suffix `-partial.md`)
+  and **Export full branch** stays available.
+- `AREX_EXPORT_LOG` is always reachable from the popup (running, stuck at 99 %, stopped, error, done).
+  The reply is a `schemaVersion: 1` bundle: timestamped progress/stage log, coordinator status and
+  transfer counters, tab-side status (or its 1 200 ms timeout notice), and the profiler snapshot when
+  profiling is on. The popup saves it as `<slug>-log-<YYYYMMDD-HHmm>.json`; the running scan is never
+  paused, cancelled or re-queried for Markdown.
+- Mode previews use `GET_MODE { includeMarkdown: false }`; the Markdown string is fetched from
+  `popup/compress-worker.js` via `GET_MARKDOWN` only when **Download** is clicked, so switching modes
+  never copies multiple megabytes across the UI thread.
+- Download Blob URLs live until Chrome reports the download finished: the popup watches
+  `chrome.downloads.onChanged` for `complete`/`interrupted` and only then calls
+  `URL.revokeObjectURL(url)` (a 10-minute fallback timer guards against a missing event). A slow
+  "Save as…" dialog can no longer revoke the URL out from under itself.
 - The content script owns the task and retains up to 500 progress events plus the completed
   result in the Arena tab memory until the background worker saves it. Closing the popup disconnects
   only the UI port; it does not cancel the task. A reopened popup requests status, replays retained
@@ -137,7 +158,7 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   `chrome.downloads.download({ saveAs: true })`, filename
   `arena-<slug(branch title|uuid)>-<YYYYMMDD-HHmm>.md`.
 - The popup follows `prefers-color-scheme` with native-Chrome tokens and renders a staged
-  progress log (`ul#log`): one line per stage (history / expand / serialize / cleanup), spinner → ✓,
+  progress log (`ul#log`): one line per stage (history / expand / process / serialize / saving), spinner → ✓;
   granular counters from pipeline events (history pages and message counts, per-pass spoiler
   counts, final markdown bytes) and an ok/warn summary. The scan percentage counts each serialized
   message and each spoiler to expand as one work unit; nested spoiler totals are added as their

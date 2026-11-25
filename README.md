@@ -44,23 +44,38 @@ that tab stops the in-tab task.
     earlier read or heredoc write of the same file. Unlike the former version, it does not
     discard different file versions or non-overlapping ranges merely because the path matches.
     **Smart and Stubs are lossy**: Smart can still shorten unique long clean output.
-  - Turn compression off to export the raw Markdown.
+  - **Off** — turn compression off to export the raw Markdown.
 
 Click **Prepare preview** to load the full history and expand spoilers as each window is processed. The popup then shows the
 exact UTF-8 Markdown size, an approximate token count, and savings against the raw export.
-Compression and token estimates run in a background Web Worker; switching modes uses a per-snapshot
-cache after the first calculation. **Download Markdown** saves the selected prepared result without
-recompressing it or loading the Arena history again. The selected mode and options are remembered.
+Compression and token estimates run in a background Web Worker; switching between **Off / Lossless /
+Smart / Stubs** uses a per-snapshot cache after the first calculation. **Download Markdown** saves the
+selected prepared result without recompressing it or loading the Arena history again. The selected
+mode and options are remembered.
 
-The latest prepared snapshot and its profiling record are saved in extension IndexedDB. Reopening the popup restores its size
-preview and lets you download it again or choose **Retake snapshot** to capture the current branch.
-The size card shows exact UTF-8 bytes plus decimal MB; Finder's separate “size on disk” value includes
-filesystem allocation overhead.
+The popup is strictly scoped to the active tab: it only shows the snapshot saved for that tab and
+conversation branch. On a non-Arena tab it shows a clean “open an Arena.ai agent conversation” state
+instead of another tab's preview, and a banner points to a scan that is still running (or finished)
+in a different Arena tab. Clicking **Stop & keep partial** during a scan keeps the messages captured
+so far: the popup then shows an amber partial-snapshot card, keeps every compression mode switchable,
+and **Download Partial Markdown** saves `…-partial.md`; **Export full branch** is one click away.
+
+The prepared snapshot and its profiling record are saved in extension IndexedDB, scoped per tab and
+branch. Reopening the popup restores that preview and lets you download it again or choose **Retake
+snapshot** to capture the current branch. The size card shows exact UTF-8 bytes plus decimal MB;
+Finder's separate “size on disk” value includes filesystem allocation overhead.
+
+The **Log & diagnostics** drawer stays available while a scan runs, is stuck at 99 %, or ends with
+stop / error / completion. **Export log (JSON)** saves `<slug>-log-<YYYYMMDD-HHmm>.json` with the
+timestamped stage log, coordinator job and transfer diagnostics, and — when **Performance profiling**
+is enabled — the live profiler snapshot, without stopping or disturbing the running scan.
 
 The popup follows the system light/dark theme (`prefers-color-scheme`) and shows a staged
 progress log. Reopening the popup during a scan reconnects to the task and replays retained
 progress events; the content script keeps the completed result until the background worker confirms
-that it has been saved to IndexedDB. During scanning, the percentage counts one work unit per
+that it has been saved to IndexedDB. The tail end of every scan is reported explicitly: the final
+spoiler cleanup shows `Closing opened spoilers: closed/total spoilers…` and the result transfer shows
+`Saving snapshot chunk X/Y to storage…` instead of a frozen 99 % line. During scanning, the percentage counts one work unit per
 serialized message and per spoiler to expand; nested spoilers are added to the total when their
 parent panels reveal them, without making the displayed percentage move backwards. The log includes
 history paging (rounds/pages/message counts), per-message progress and spoiler counters, and the

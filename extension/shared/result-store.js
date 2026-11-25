@@ -19,6 +19,15 @@
   const MAX_SCOPED_LOGS = 16;
 
   let databasePromise = null;
+  // Writes inside the same millisecond would otherwise tie in the LRU order.
+  // A small monotonic clock keeps "newest wins" deterministic for eviction and
+  // for scoped lookups without relying on wall-clock resolution.
+  let lastTimestamp = 0;
+  const monotonicNow = () => {
+    const wall = Date.now();
+    lastTimestamp = wall > lastTimestamp ? wall : lastTimestamp + 1;
+    return lastTimestamp;
+  };
 
   const byteLength = text => {
     try { return new TextEncoder().encode(String(text ?? '')).length; }
@@ -98,8 +107,8 @@
       filename: snapshot?.filename || null,
       stats: snapshot?.stats || null,
       warnings: Array.isArray(snapshot?.warnings) ? snapshot.warnings : [],
-      createdAt: snapshot?.createdAt || Date.now(),
-      updatedAt: Number.isFinite(updatedAt) ? updatedAt : (snapshot?.updatedAt || Date.now()),
+      createdAt: snapshot?.createdAt || monotonicNow(),
+      updatedAt: Number.isFinite(updatedAt) ? updatedAt : (snapshot?.updatedAt || monotonicNow()),
       bytes: typeof snapshot?.bytes === 'number' ? snapshot.bytes : byteLength(markdown),
       tabId: typeof snapshot?.tabId === 'number' ? snapshot.tabId : (normalizeId(snapshot?.tabId) ?? null),
       chatUuid: snapshot?.chatUuid ? String(snapshot.chatUuid) : null,
@@ -111,7 +120,7 @@
   }
 
   function makeSnapshotRecord(scope, snapshot, { partial = false, profile = null } = {}) {
-    const updatedAt = Date.now();
+    const updatedAt = monotonicNow();
     const record = {
       snapshot: snapshot ? { ...snapshot, createdAt: snapshot?.createdAt || updatedAt, updatedAt } : null,
     };
@@ -168,7 +177,7 @@
                     snapshot: migratedSnapshot,
                     meta: legacyMeta && typeof legacyMeta === 'object' ? { ...legacyMeta } : metaOf(migratedSnapshot),
                     profile: legacyProfile && typeof legacyProfile === 'object' ? { ...legacyProfile } : null,
-                    updatedAt: Date.now(),
+                    updatedAt: monotonicNow(),
                     recordType: 'snapshot',
                   };
                   if (!Number.isFinite(record.meta.updatedAt)) record.meta.updatedAt = record.meta.createdAt || record.updatedAt;
@@ -345,7 +354,7 @@
       log: { ...logBundle },
       tabId: tabId !== null ? tabId : null,
       chatUuid: chatUuid !== null ? String(chatUuid) : null,
-      updatedAt: Date.now(),
+      updatedAt: monotonicNow(),
       recordType: 'log',
     };
     await withStore('readwrite', async (store) => {
