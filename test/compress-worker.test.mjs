@@ -87,3 +87,44 @@ test('popup ignores stale worker replies, caches modes and downloads the selecte
   assert.equal(workers[0].requests.length, count, 'previously computed mode should be cached');
   dom.window.close();
 });
+
+test('GET_MODE with includeMarkdown:false omits markdown and GET_MARKDOWN returns it', () => {
+  const sent = [], sandbox = { TextEncoder, console, self: { postMessage: message => sent.push(message) } };
+  vm.createContext(sandbox);
+  sandbox.importScripts = () => vm.runInContext(read('content/compress.js'), sandbox);
+  vm.runInContext(read('popup/compress-worker.js'), sandbox);
+  const send = data => sandbox.self.onmessage({ data });
+  const markdown = 'hello мир\n\n**stdout:**\n\n```text\n' + Array.from({ length: 30 }, (_, i) => 'same line ' + i).join('\n') + '\n```\n\n#### second\n\n**stdout:**\n\n```text\n' + Array.from({ length: 30 }, (_, i) => 'same line ' + i).join('\n') + '\n```';
+  send({ type: 'INIT_SNAPSHOT', snapshotId: 7, markdown });
+
+  // Request with includeMarkdown:false
+  send({ type: 'GET_MODE', snapshotId: 7, requestId: 1, mode: 'lossless', includeMarkdown: false });
+  assert.equal(sent.length, 1);
+  const metaMsg = sent[0];
+  assert.equal(metaMsg.type, 'MODE_RESULT');
+  assert.equal(metaMsg.snapshotId, 7);
+  assert.equal(metaMsg.requestId, 1);
+  assert.equal(metaMsg.mode, 'lossless');
+  assert.equal(metaMsg.result.markdown, undefined);
+  assert.equal(typeof metaMsg.result.bytes, 'number');
+  assert.equal(typeof metaMsg.result.baselineBytes, 'number');
+  assert.equal(typeof metaMsg.result.estimatedTokens, 'number');
+  assert.equal(typeof metaMsg.result.savedBytes, 'number');
+  assert.ok(metaMsg.result.stats && typeof metaMsg.result.stats === 'object');
+
+  // GET_MARKDOWN returns the full markdown
+  send({ type: 'GET_MARKDOWN', snapshotId: 7, requestId: 2, mode: 'lossless' });
+  assert.equal(sent.length, 2);
+  const mdMsg = sent[1];
+  assert.equal(mdMsg.type, 'MARKDOWN_RESULT');
+  assert.equal(mdMsg.snapshotId, 7);
+  assert.equal(mdMsg.requestId, 2);
+  assert.equal(mdMsg.mode, 'lossless');
+  assert.equal(typeof mdMsg.markdown, 'string');
+  assert.match(mdMsg.markdown, /Identical to \[output #1\]/);
+
+  // Default (includeMarkdown not set) still includes markdown for backward compat
+  send({ type: 'GET_MODE', snapshotId: 7, requestId: 3, mode: 'smart' });
+  assert.equal(sent[2].type, 'MODE_RESULT');
+  assert.equal(typeof sent[2].result.markdown, 'string');
+});

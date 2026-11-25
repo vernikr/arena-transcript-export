@@ -4,8 +4,29 @@ globalThis.AREX = globalThis.AREX || {};
 
 (function () {
   const tick = String.fromCharCode(96);
-  const encoder = new TextEncoder();
-  const utf8Bytes = value => encoder.encode(value).length;
+  const utf8Bytes = value => {
+    let bytes = 0;
+    for (let i = 0; i < value.length; i++) {
+      const c = value.charCodeAt(i);
+      if (c < 0x80) bytes += 1;
+      else if (c < 0x800) bytes += 2;
+      else if (c >= 0xD800 && c <= 0xDBFF) {
+        const next = value.charCodeAt(i + 1);
+        if (next >= 0xDC00 && next <= 0xDFFF) { bytes += 4; i++; }
+        else bytes += 3;
+      } else if (c >= 0xDC00 && c <= 0xDFFF) bytes += 3;
+      else bytes += 3;
+    }
+    return bytes;
+  };
+  const fnv1a32 = str => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  };
   const formatBytes = bytes => {
     const safe = Math.max(0, Math.round(bytes));
     if (safe < 1000) return safe + ' B';
@@ -56,8 +77,7 @@ globalThis.AREX = globalThis.AREX || {};
       }
       i += width;
     }
-    flush();
-    return total;
+    flush(); return total;
   }
 
   // Split only once and retain offsets into the original. Fences are found in
@@ -82,7 +102,7 @@ globalThis.AREX = globalThis.AREX || {};
         for (let j = i - 1; j > Math.max(lastBoundary, i - 13); j--) {
           const text = lines[j];
           const labels = text.includes('**') ? [...text.matchAll(/\*\*(stdout|stderr|command):\*\*/gi)] : [];
-          const files = text.includes('📄') ? [...text.matchAll(/\*\*📄\s*([^*]+)\*\*\s*_\(([^)]+)\)_/gi)] : [];
+          const files = text.includes('📄') ? [...text.matchAll(/\*\*📄\s*([^*]+)\*\*\s*_\\(([^)]+)\\)_/gi)] : [];
           const l = labels.at(-1), f = files.at(-1);
           if (l || f) {
             if (f && (!l || f.index > l.index)) fileName = f[1].trim();
@@ -97,8 +117,12 @@ globalThis.AREX = globalThis.AREX || {};
       }
       if (!open.closeRe.test(line)) continue;
       const body = lines.slice(open.start + 1, i).join('\n');
-      const block = { ...open, end: i, endOffset: offsets[i] + line.length, closeLine: line, body,
-        bytes: utf8Bytes(body), estimatedTokens: estimateTokens(body), pairedCommand: null };
+      const endOffset = offsets[i] + line.length;
+      const rawSlice = rawMarkdown.slice(open.startOffset, endOffset);
+      const block = { ...open, end: i, endOffset, closeLine: line, body,
+        bytes: utf8Bytes(body), estimatedTokens: estimateTokens(body),
+        rawSliceBytes: utf8Bytes(rawSlice), rawSliceTokens: estimateTokens(rawSlice),
+        pairedCommand: null };
       if (block.label === 'command') lastCommand = block;
       else if ((block.label === 'stdout' || block.label === 'stderr') && lastCommand?.activityId === block.activityId) {
         block.pairedCommand = lastCommand;
@@ -107,7 +131,7 @@ globalThis.AREX = globalThis.AREX || {};
       else if (!block.label) lastCommand = null;
       blocks.push(block); open = null; lastBoundary = i;
     }
-    return { markdown: rawMarkdown, blocks, bytes: utf8Bytes(rawMarkdown) };
+    return { markdown: rawMarkdown, blocks, bytes: utf8Bytes(rawMarkdown), baseTokens: estimateTokens(rawMarkdown) };
   }
   const PASS_PATTERNS = [
     /^\(pass\)\s+\S.*$/,
@@ -204,7 +228,7 @@ globalThis.AREX = globalThis.AREX || {};
     const pathBody = /^\s*(?:<path>|path:\s*|file:\s*)([^\n<]+)(?:<\/path>)?/i.exec(block.body);
     const path = block.fileName || heading?.[1] || pathBody?.[1];
     if (!path || block.label === 'command') return null;
-    const clean = path.trim().replace(/^["']+|["']+$/g, '').replace(/[\\/]+/g, '/');
+    const clean = path.trim().replace(/^["']+|["']+$/g, '').replace(/[\\\/]+/g, '/');
     return { key: '\0' + clean, path: clean };
   }
 
@@ -215,36 +239,57 @@ globalThis.AREX = globalThis.AREX || {};
     if (edit.stubAnchor) content = '<a id="arex-stubs-output-' + edit.stubAnchor + '"></a>\n' + content;
     return content;
   }
-  const editBytes = (block, edit) => utf8Bytes(renderBlock(block, edit) ?? '');
 
   function compressIndex(index, options = {}) {
     const mode = ['off', 'lossless', 'smart', 'stubs'].includes(options.mode) ? options.mode : 'lossless';
     const raw = index.markdown, blocks = index.blocks, baseBytes = index.bytes;
+    const baseTokens = index.baseTokens ?? estimateTokens(raw);
     const stats = { deduplicated: 0, smartCompacted: 0, stubbed: 0 };
-    if (mode === 'off') return { markdown: raw, bytes: baseBytes, baselineBytes: baseBytes, savedBytes: 0, savedRatio: 0, estimatedTokens: estimateTokens(raw), stats };
-    let edits = new Map(), bytes = baseBytes;
+    if (mode === 'off') return { markdown: raw, bytes: baseBytes, baselineBytes: baseBytes, savedBytes: 0, savedRatio: 0, estimatedTokens: baseTokens, stats };
+    let edits = new Map(), bytes = baseBytes, tokens = baseTokens;
     const setEdit = (map, block, edit) => {
       const old = map.get(block);
-      const originalBytes = utf8Bytes(raw.slice(block.startOffset, block.endOffset));
-      const before = old ? editBytes(block, old) : originalBytes;
-      const after = editBytes(block, edit);
+      const originalBytes = block.rawSliceBytes ?? utf8Bytes(raw.slice(block.startOffset, block.endOffset));
+      const originalTokens = block.rawSliceTokens ?? estimateTokens(raw.slice(block.startOffset, block.endOffset));
+      const beforeStr = old ? renderBlock(block, old) : null;
+      const afterStr = renderBlock(block, edit);
+      const beforeBytes = beforeStr != null ? utf8Bytes(beforeStr) : originalBytes;
+      const beforeTokens = beforeStr != null ? estimateTokens(beforeStr) : originalTokens;
+      const afterBytes = utf8Bytes(afterStr);
+      const afterTokens = estimateTokens(afterStr);
       map.set(block, edit);
-      return after - before;
+      return [afterBytes - beforeBytes, afterTokens - beforeTokens];
     };
+
     const seen = new Map(); let nextId = 1;
     for (const block of blocks) {
       if (block.label === 'command' || (!block.label && !block.fileName) || block.bytes < 128) continue;
-      const first = seen.get(block.body);
-      if (!first) { seen.set(block.body, { id: nextId++, block, anchored: false }); continue; }
-      if (!first.anchored) {
-        bytes += setEdit(edits, first.block, { body: first.block.body, anchor: first.id }); first.anchored = true;
+      const h = fnv1a32(block.body);
+      const key = block.bytes + ':' + h;
+      const bucket = seen.get(key);
+      let first = null;
+      if (bucket) {
+        for (let bi = 0; bi < bucket.length; bi++) {
+          if (bucket[bi].block.body === block.body) { first = bucket[bi]; break; }
+        }
       }
-      bytes += setEdit(edits, block, { reference: '_Identical to [output #' + first.id + '](#arex-output-' + first.id + ') — byte-for-byte match._' });
+      if (!first) {
+        const entry = { id: nextId++, block, anchored: false };
+        if (bucket) bucket.push(entry); else seen.set(key, [entry]);
+        continue;
+      }
+      if (!first.anchored) {
+        const [bd, td] = setEdit(edits, first.block, { body: first.block.body, anchor: first.id });
+        bytes += bd; tokens += td; first.anchored = true;
+      }
+      const [bd, td] = setEdit(edits, block, { reference: '_Identical to [output #' + first.id + '](#arex-output-' + first.id + ') — byte-for-byte match._' });
+      bytes += bd; tokens += td;
       stats.deduplicated++;
     }
-    if (bytes >= baseBytes) { edits = new Map(); bytes = baseBytes; stats.deduplicated = 0; }
+    if (bytes >= baseBytes) { edits = new Map(); bytes = baseBytes; tokens = baseTokens; stats.deduplicated = 0; }
+
     if (mode === 'smart' || mode === 'stubs') {
-      const smartEdits = new Map(edits); let smartBytes = bytes, count = 0;
+      const smartEdits = new Map(edits); let smartBytes = bytes, smartTokens = tokens, count = 0;
       for (const block of blocks) {
         if ((block.label !== 'stdout' && block.label !== 'stderr') || edits.get(block)?.reference || edits.get(block)?.anchor) continue;
         let body = stripTerminalNoise(block.body);
@@ -260,11 +305,13 @@ globalThis.AREX = globalThis.AREX || {};
           }
         }
         if (body !== block.body && utf8Bytes(body) < block.bytes) {
-          smartBytes += setEdit(smartEdits, block, { ...smartEdits.get(block), body }); count++;
+          const [bd, td] = setEdit(smartEdits, block, { ...smartEdits.get(block), body });
+          smartBytes += bd; smartTokens += td; count++;
         }
       }
-      if (smartBytes <= bytes) { edits = smartEdits; bytes = smartBytes; stats.smartCompacted = count; }
+      if (smartBytes <= bytes) { edits = smartEdits; bytes = smartBytes; tokens = smartTokens; stats.smartCompacted = count; }
     }
+
     if (mode === 'stubs') {
       // Reuse only byte-identical consecutive lines that remain visible in an
       // earlier output. Different reads/ranges and old file versions may contain
@@ -284,7 +331,7 @@ globalThis.AREX = globalThis.AREX || {};
       }
       const stubEdits = new Map(edits), reservedIds = new Set();
       for (const match of raw.matchAll(/arex-stubs-output-(\d+)/g)) reservedIds.add(match[1]);
-      let stubBytes = bytes, count = 0, nextStubId = 1;
+      let stubBytes = bytes, stubTokens = tokens, count = 0, nextStubId = 1;
       for (const entries of groups.values()) {
         if (entries.length < 2) continue;
         const seeds = new Map();
@@ -316,14 +363,29 @@ globalThis.AREX = globalThis.AREX || {};
           const replacement = pieces.join('\n');
           if (used.size && utf8Bytes(replacement) < utf8Bytes(current)) {
             // Charge each newly inserted anchor before deciding to keep the edit.
-            const trial = new Map(stubEdits); let delta = 0;
+            const undo = []; let delta = 0, tokenDelta = 0;
             for (const source of used) {
-              const previous = trial.get(source.block) || {};
-              if (!previous.stubAnchor)
-                delta += setEdit(trial, source.block, { ...previous, stubAnchor: source.id });
+              const previous = stubEdits.get(source.block) || {};
+              if (!previous.stubAnchor) {
+                const had = stubEdits.has(source.block);
+                const prev = stubEdits.get(source.block);
+                const [bd, td] = setEdit(stubEdits, source.block, { ...previous, stubAnchor: source.id });
+                undo.push({ b: source.block, had, prev });
+                delta += bd; tokenDelta += td;
+              }
             }
-            delta += setEdit(trial, block, { ...trial.get(block), body: replacement });
-            if (delta < 0) { stubEdits.clear(); for (const [k, v] of trial) stubEdits.set(k, v); stubBytes += delta; count++; continue; }
+            {
+              const had = stubEdits.has(block);
+              const prev = stubEdits.get(block);
+              const [bd, td] = setEdit(stubEdits, block, { ...stubEdits.get(block), body: replacement });
+              undo.push({ b: block, had, prev });
+              delta += bd; tokenDelta += td;
+            }
+            if (delta < 0) { stubBytes += delta; stubTokens += tokenDelta; count++; continue; }
+            for (let u = undo.length - 1; u >= 0; u--) {
+              const e = undo[u];
+              if (e.had) stubEdits.set(e.b, e.prev); else stubEdits.delete(e.b);
+            }
           }
           // Only unchanged blocks become sources, preventing reference chains
           // and ensuring line numbers remain valid even after later edits.
@@ -340,8 +402,9 @@ globalThis.AREX = globalThis.AREX || {};
           }
         }
       }
-      if (stubBytes <= bytes) { edits = stubEdits; bytes = stubBytes; stats.stubbed = count; }
+      if (stubBytes <= bytes) { edits = stubEdits; bytes = stubBytes; tokens = stubTokens; stats.stubbed = count; }
     }
+
     const parts = []; let last = 0;
     for (const block of blocks) {
       const edit = edits.get(block);
@@ -350,12 +413,13 @@ globalThis.AREX = globalThis.AREX || {};
     }
     parts.push(raw.slice(last));
     const markdown = parts.join(''), savedBytes = baseBytes - bytes;
-    return { markdown, bytes, baselineBytes: baseBytes, savedBytes, savedRatio: baseBytes ? savedBytes / baseBytes : 0, estimatedTokens: estimateTokens(markdown), stats };
+    return { markdown, bytes, baselineBytes: baseBytes, savedBytes, savedRatio: baseBytes ? savedBytes / baseBytes : 0, estimatedTokens: tokens, stats };
   }
+
   AREX.buildMarkdownIndex = buildMarkdownIndex;
   AREX.compressIndex = compressIndex;
   AREX.compressMarkdown = (rawMarkdown, options = {}) => compressIndex(options.mode === 'off'
-    ? { markdown: rawMarkdown, blocks: [], bytes: utf8Bytes(rawMarkdown) } : buildMarkdownIndex(rawMarkdown), options);
+    ? { markdown: rawMarkdown, blocks: [], bytes: utf8Bytes(rawMarkdown), baseTokens: estimateTokens(rawMarkdown) } : buildMarkdownIndex(rawMarkdown), options);
   AREX.formatTokenCount = function (tokens) {
     const safe = Math.max(0, Math.round(tokens));
     if (safe === 0) return '0';

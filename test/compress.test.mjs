@@ -267,3 +267,180 @@ test('Stubs chooses anchor IDs that do not collide with original content', () =>
   assert.match(result.markdown, /earlier output #arex-stubs-output-2/);
   dom.window.close();
 });
+
+test('Lossless dedup handles FNV-1a hash collisions without false matches', () => {
+  const { AREX, dom } = makeEnv();
+  // Same length (128) and same FNV-1a 32-bit hash, different content.
+  const a = 'gs1kez4aolnz5vqjf16znry06ufctkjocawc74qbw3g8xlak6ylv6036xi1uod8qq4yubpe35arnsi58htprdm1tuioub3utdbhj54whchjn1k5libjrknonckp9wgrd';
+  const b = 'bbvgrdlvgw8ug9anojhr89f4g1vu6akl5eu053nbxt50tmvpwy7zv9qk62jvugqbqa1c5x2xg3ah362ipotwvqjtz3zhg3q1u87gqzaudmqrz7vwqkvr77kz8n3o153a';
+  assert.notEqual(a, b);
+  assert.equal(a.length, b.length);
+  // Verify collision with the same algorithm used in compress.js
+  const fnv1a32 = str => { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; };
+  assert.equal(fnv1a32(a), fnv1a32(b));
+
+  const raw = outputBlock(a) + '\n\n#### second\n\n' + outputBlock(b) + '\n\n#### third\n\n' + outputBlock(a);
+  const result = AREX.compressMarkdown(raw, { mode: 'lossless' });
+  // Only the identical a/a pair should dedup; b must remain distinct.
+  assert.equal(result.stats.deduplicated, 1);
+  assert.match(result.markdown, /Identical to \[output #1\]/);
+  assert.ok(result.markdown.includes(b));
+  // The b block should not be replaced by a reference.
+  const refCount = (result.markdown.match(/Identical to \[output #/g) || []).length;
+  assert.equal(refCount, 1);
+  dom.window.close();
+});
+
+test('utf8Bytes has exact Unicode/surrogate parity with TextEncoder', () => {
+  const { AREX, dom } = makeEnv();
+  const enc = new TextEncoder();
+  const cases = [
+    '', 'ascii', 'Hello мир 🌍', '漢字かなカナ', 'é\u0301', '𝒜𝒞𝒢',
+    '\uD800', '\uDC00', 'a\uD800b', 'a\uDC00b', '\uD800\uDC00', '\uD800\uD800',
+    '\uDC00\uD800', '\uDBFF\uDFFF', '\uD800\uDFFF', '\u0000\u007f\u0080\u07ff\u0800\uffff',
+    'line\nwith\r\nnewlines\tand\0null',
+  ];
+  // Also random BMP + astral + lone surrogates
+  let seed = 0xC0FFEE;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0);
+  for (let i = 0; i < 200; i++) {
+    let s = '';
+    for (let j = 0; j < 40; j++) {
+      const r = rnd() % 5;
+      if (r === 0) s += String.fromCharCode(rnd() % 0x80);
+      else if (r === 1) s += String.fromCharCode(0x80 + rnd() % 0x700);
+      else if (r === 2) s += String.fromCharCode(0x800 + rnd() % 0xF800);
+      else if (r === 3) s += String.fromCodePoint(0x10000 + (rnd() % 0x1000));
+      else s += String.fromCharCode(0xD800 + (rnd() % 0x800)); // surrogates, including lone
+    }
+    cases.push(s);
+  }
+  for (const value of cases) {
+    assert.equal(AREX.measureMarkdown(value).bytes, enc.encode(value).length, JSON.stringify(value.slice(0, 20)));
+  }
+  dom.window.close();
+});
+
+test('Stubs rollback preserves correctness when trial increases bytes', () => {
+  const { AREX, dom } = makeEnv();
+  // Build a case where a stubs reference would be attempted but the anchor overhead
+  // makes it not beneficial, forcing rollback. The block must remain unchanged.
+  const nl = String.fromCharCode(10);
+  const shared = Array.from({ length: 6 }, (_, i) => `shared-${i}-${'x'.repeat(20)}`);
+  // First block: has the shared lines (will become a source if unchanged)
+  const first = ['header', ...shared, 'tail1'].join(nl);
+  // Second block: shares lines but is small enough that adding anchor+marker is not worth it
+  // Make replacement barely not beneficial by using short unique prefix and short body
+  const second = ['unique', ...shared, 'tail2'].join(nl);
+  const raw = `#### used Read a.ts 1ms\n\n${fenced(first)}\n\n#### used Read a.ts 2ms\n\n${fenced(second)}`;
+  const smart = AREX.compressMarkdown(raw, { mode: 'smart' });
+  const stubs = AREX.compressMarkdown(raw, { mode: 'stubs' });
+  // Either stubs applied (bytes < smart) or it rolled back correctly (equal to smart).
+  assert.ok(stubs.bytes <= smart.bytes);
+  // Content integrity: unique lines must survive
+  assert.match(stubs.markdown, /header/);
+  assert.match(stubs.markdown, /unique/);
+  assert.match(stubs.markdown, /tail1/);
+  assert.match(stubs.markdown, /tail2/);
+  // If rolled back, markdown should be identical to smart
+  if (stubs.stats.stubbed === 0) {
+    assert.equal(stubs.markdown, smart.markdown);
+  }
+  dom.window.close();
+});
+
+test('Stubs does not clone Maps inside the stub loop', () => {
+  const { AREX, dom } = makeEnv();
+  const nl = String.fromCharCode(10);
+  // Create a case with many groups/blocks to exercise the stubs loop.
+  const shared = Array.from({ length: 40 }, (_, i) => `shared line ${i} = 'abcdefghijk'`);
+  const mk = (name, extra) => `#### used Read ${name}.ts 1ms\n\n${fenced([extra, ...shared, extra + '-end'].join(nl))}`;
+  const raw = [mk('a', 'A'), mk('a', 'B'), mk('a', 'C'), mk('b', 'D'), mk('b', 'E')].join('\n\n');
+
+  const RealMap = dom.window.Map;
+  let clones = 0;
+  class SpyMap extends RealMap {
+    constructor(arg) {
+      super(arg);
+      // A clone-from-map with existing size is what we're forbidding inside the loop.
+      if (arg instanceof RealMap && arg.size > 0) clones++;
+    }
+  }
+  dom.window.Map = SpyMap;
+  globalThis.Map = SpyMap;
+  try {
+    const result = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'stubs' });
+    assert.ok(result.stats.stubbed > 0);
+  } finally {
+    dom.window.Map = RealMap;
+    globalThis.Map = RealMap;
+  }
+  // Allow the expected small fixed number of clones (smartEdits clone, stubEdits clone) but not per-block.
+  assert.ok(clones <= 2, 'expected <= 2 Map clones, got ' + clones);
+  dom.window.close();
+});
+
+test('incremental token delta matches estimateTokens(markdown) for all modes', () => {
+  const { AREX, dom } = makeEnv();
+  const nl = String.fromCharCode(10);
+  const body = Array.from({ length: 30 }, (_, i) => 'same output line ' + i + ' with enough text').join(nl);
+  const passes = Array.from({ length: 12 }, (_, i) => '✓ suite > test-' + i + ' [1.00ms]').join(nl);
+  const raw = [
+    outputBlock(body),
+    '#### second\n\n' + outputBlock(body),
+    '#### third\n\n' + outputBlock(passes),
+    '#### used Read f.ts 1ms\n\n' + fenced(Array.from({ length: 40 }, (_, i) => `line ${i} abcdefghijk`).join(nl)),
+    '#### used Read f.ts 2ms\n\n' + fenced(Array.from({ length: 40 }, (_, i) => `line ${i} abcdefghijk`).join(nl).replace('line 39', 'line 39 changed')),
+  ].join('\n\n');
+  const index = AREX.buildMarkdownIndex(raw);
+  for (const mode of ['off', 'lossless', 'smart', 'stubs']) {
+    const result = AREX.compressIndex(index, { mode });
+    const fresh = AREX.measureMarkdown(result.markdown).estimatedTokens;
+    assert.equal(result.estimatedTokens, fresh, mode + ' token parity');
+  }
+  dom.window.close();
+});
+
+test('no TextEncoder.encode Uint8Array allocations during buildMarkdownIndex and compressIndex', () => {
+  const { AREX, dom } = makeEnv();
+  const nl = String.fromCharCode(10);
+  const body = Array.from({ length: 30 }, (_, i) => 'output ' + i + ' мир 🌍').join(nl);
+  const raw = outputBlock(body) + '\n\n#### second\n\n' + outputBlock(body);
+  const RealTE = dom.window.TextEncoder;
+  // Our implementation must not rely on TextEncoder.encode in hot paths.
+  dom.window.TextEncoder = class { encode() { throw new Error('TextEncoder.encode should not be called'); } };
+  globalThis.TextEncoder = dom.window.TextEncoder;
+  try {
+    const index = AREX.buildMarkdownIndex(raw);
+    for (const mode of ['off', 'lossless', 'smart', 'stubs']) AREX.compressIndex(index, { mode });
+    AREX.measureMarkdown(raw);
+  } finally {
+    dom.window.TextEncoder = RealTE;
+    globalThis.TextEncoder = RealTE;
+  }
+  dom.window.close();
+});
+
+test('strict byte monotonicity Off >= Lossless >= Smart >= Stubs', () => {
+  const { AREX, dom } = makeEnv();
+  const nl = String.fromCharCode(10);
+  const cases = [];
+  // repeated output
+  const body = Array.from({ length: 30 }, (_, i) => 'same line ' + i).join(nl);
+  cases.push(outputBlock(body) + '\n\n#### b\n\n' + outputBlock(body));
+  // noisy test run
+  const passes = Array.from({ length: 12 }, (_, i) => '✓ suite > t-' + i + ' [1ms]').join(nl);
+  cases.push(outputBlock(passes));
+  // stubs-eligible reads
+  const shared = Array.from({ length: 40 }, (_, i) => `shared ${i} abcdefghijk`).join(nl);
+  cases.push(`#### used Read a.ts 1ms\n\n${fenced(shared)}\n\n#### used Read a.ts 2ms\n\n${fenced(shared + nl + 'extra')}`);
+  for (const raw of cases) {
+    const index = AREX.buildMarkdownIndex(raw);
+    const results = ['off', 'lossless', 'smart', 'stubs'].map(mode => AREX.compressIndex(index, { mode }));
+    for (let i = 1; i < results.length; i++) {
+      assert.ok(results[i].bytes <= results[i - 1].bytes, `monotonicity at ${i} for case`);
+      assert.equal(results[i].bytes, AREX.measureMarkdown(results[i].markdown).bytes, 'byte accounting');
+    }
+  }
+  dom.window.close();
+});
