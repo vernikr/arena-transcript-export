@@ -248,7 +248,6 @@ test('stopping after two serialized messages delivers a partial result after spo
   AREX.chatTitle = () => 'Partial test';
   AREX.slug = () => 'partial-test';
   AREX.stamp = () => '20261125-1200';
-  AREX.serializeHeader = () => '# Captured transcript';
   let thirdStarted;
   let thirdHasStarted = false;
   const thirdStart = new Promise(resolve => { thirdStarted = () => { thirdHasStarted = true; resolve(); }; });
@@ -290,7 +289,9 @@ test('stopping after two serialized messages delivers a partial result after spo
   assert.equal(cleanup, true);
   assert.equal(AREX._job.result.partial, true);
   assert.equal(AREX._job.result.completedMessages, 2);
-  assert.match(AREX._job.result.markdown, /Status: Partial export \(stopped at 2\/5 messages\)/);
+  // The header flags both the serialized count and the known total.
+  assert.match(AREX._job.result.markdown, /^- Messages: 2$/m);
+  assert.match(AREX._job.result.markdown, /^- Status: Partial export \(2\/5 messages\)$/m);
   assert.match(AREX._job.result.markdown, /Message m1[\s\S]*Message m2/);
   assert.doesNotMatch(AREX._job.result.markdown, /Message m3/);
   const end = chromeMock.jobPort.sent.find(message => message.type === 'AREX_RESULT_END');

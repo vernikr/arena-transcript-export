@@ -53,6 +53,26 @@ const now = await measure(() => current.serialize(current.logEl()));
 if (norm(now.result) !== expected) throw new Error('Current serializer does not match the committed snapshot');
 console.log(`Fixture: HTML ${Buffer.byteLength(fixture)} B; output ${Buffer.byteLength(now.result)} B; 9 messages.`);
 console.log(`Current synchronous serializer: ${ms(now.ms)}; byte parity with snapshot: yes.`);
+// Cooperative walker parity with the synchronous path, including amortised
+// checkpoints (the fixture is one static snapshot; nothing mounts new DOM).
+current.yieldToMain = async () => {};
+const asyncWalk = await measure(async () => {
+  const pieces = [];
+  for (const message of current.messages(current.logEl())) pieces.push(await current.serializeMessageAsync(message, {}));
+  return [current.serializeHeader(pieces.length), ...pieces].join('\n\n') + '\n';
+});
+if (norm(asyncWalk.result) !== expected) throw new Error('Async walker does not match the committed snapshot');
+console.log(`Current cooperative async walker: ${ms(asyncWalk.ms)}; byte parity with snapshot: yes.`);
+for (const options of [{ timestamps: true }, { includeToolActivity: false }, { timestamps: true, includeToolActivity: false }]) {
+  const syncOpt = await measure(() => current.serialize(current.logEl(), options));
+  const asyncOpt = await measure(async () => {
+    const pieces = [];
+    for (const message of current.messages(current.logEl())) pieces.push(await current.serializeMessageAsync(message, options));
+    return [current.serializeHeader(pieces.length), ...pieces].join('\n\n') + '\n';
+  });
+  if (norm(syncOpt.result) !== norm(asyncOpt.result)) throw new Error('Option parity failure: ' + JSON.stringify(options));
+}
+console.log('Option combinations (timestamps / includeToolActivity): sync->async parity yes.');
 if (oldDom) {
   const old = oldDom.window.AREX, prior = await measure(() => old.serialize(old.logEl()));
   const equal = norm(prior.result) === norm(now.result);

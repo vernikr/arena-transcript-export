@@ -23,7 +23,7 @@ extension/
   content/loader.js        1️⃣ history gate: sentinel + mutation-driven page loading
   content/expand.js        2️⃣ scoped spoiler expansion and cleanup
   content/markdown.js      HTML → Markdown (block-level recursive)
-  content/serialize.js     3️⃣ zero-clone, cooperative message walk → Markdown
+  content/serialize.js     3️⃣ zero-clone, zero-generator iterative walk → Markdown
   content/compress.js      deterministic Lossless/Smart/Stubs transforms + UTF-8/token metrics
   content/profile.js       bounded, zero-I/O profiling recorder for one export run
   content/main.js          tab-resident window pipeline + reconnectable status/result API
@@ -69,10 +69,15 @@ EXPORT_START → load history (sentinel + MutationObserver)
    Already-open controls remain open. Message identity/order is checked during processing to avoid
    silently exporting a branch which unloaded messages.
 3. **Serialization** (`serialize.js` + `markdown.js`). Walk messages in order without cloning
-   mounted panels; the synchronous compatibility API and cooperative async walker share the same
-   rendering logic. The async walker yields on a ~20 ms budget between DOM nodes, using
+   mounted panels. Both public APIs consume the same zero-generator iterative walker: an explicit
+   frame stack (`CHILDREN` sibling cursors, one live frame per open nesting level, plus `ITEM`
+   frames that compose spoiler groups once their panels drain) replaces per-element `yield*`
+   delegation. The synchronous compatibility API never reads the clock; the cooperative async
+   walker counts visited nodes and checks a ~20 ms budget once per 64 nodes, yields via
    `scheduler.yield` or `MessageChannel` when available, and reports processed messages and bytes.
    Individual large text/code conversion operations still run synchronously.
+   `AREX.serializeHeader(count)` is byte-stable; `AREX.serializeHeader(count, { partial: true,
+   totalMessages })` additionally marks a stopped export in the metadata block.
 
 ### DOM → Markdown mapping
 

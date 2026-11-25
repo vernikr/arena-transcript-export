@@ -466,7 +466,9 @@ AREX.runExport = async function (options = {}) {
     if (cancelled && completedMessages >= 1) {
       const totalMessages = partial.totalMessages;
       const warnings = [...(partial.warnings || []), `Partial export stopped at ${completedMessages}/${totalMessages} messages.`];
-      const markdown = [partial.parts[0], `- Status: Partial export (stopped at ${completedMessages}/${totalMessages} messages)`, ...partial.parts.slice(1)].join('\n\n') + '\n';
+      // The header carries full metadata (including the partial line), so the
+      // assembled document is a plain join just like a completed export.
+      const markdown = [AREX.serializeHeader(completedMessages, { partial: true, totalMessages }), ...partial.parts.slice(1)].join('\n\n') + '\n';
       const bytes = AREX.utf8ByteLength(markdown);
       const result = {
         markdown,

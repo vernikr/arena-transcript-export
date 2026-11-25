@@ -126,3 +126,25 @@ requires balancing speed against silent late legacy pagination.
 - The completed result is retained until acknowledged; disconnections are retried at most five
   times. If retries are exhausted, retake the snapshot while the Arena tab is still open. The
   transfer guard is 64 Mi UTF-16 code units, not an exact 64 MiB UTF-8 limit.
+
+## Wave 3.2: iterative (zero-generator) serializer walk
+
+Issue #22 replaced the recursive `function*` / `yield*` message walk with an explicit frame stack
+shared by the synchronous and cooperative async serializers, amortised the async budget check to
+one clock read per 64 visited nodes, removed the `.filter(...).map(...)` arrays from `fileChip`,
+and changed `footerSet` to climb from each `<time>` to the nearest `Copy`-bearing ancestor instead
+of running four full-subtree selectors per ancestor. `npm run benchmark` additionally verifies
+sync↔async parity on the fixture for every option combination.
+
+Measured on the agent sandbox (Node 20.20.2, jsdom, Intel Xeon @ 2.6 GHz), median of fresh-DOM
+runs, output byte-identical to the pre-change serializer after normalizing the export timestamp:
+
+| Measurement | Before (generator walk) | After (iterative walk) | Notes |
+|---|---:|---:|---|
+| `AREX.serialize`, 73,524-element page (fixture ×4), 5 fresh processes | 242.2 ms | 218.1–234.6 ms | ~1.04–1.11×; output byte-identical |
+| Sync / async walk, 73,524-element generated transcript | 1,004 / 330 ms | 914 / 257 ms | 1.10× / 1.29×; output byte-identical |
+| `footerSet`, 9-message fixture | 3.35 ms | ~1.4 ms | Per-`<time>` ancestry instead of per-node selector scans |
+
+These are jsdom numbers: the remaining time is dominated by jsdom's CSS engine (`matches`), DOM
+accessors and GC, so the absolute speedup understates the browser effect of removing per-element
+generator suspension and resume. A real Chrome page was not measured for this change.

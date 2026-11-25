@@ -112,11 +112,154 @@ test('cancellation thrown during expansion still closes already opened panels', 
   assert.equal(log.querySelectorAll('[style*="overflow: clip"]').length, 0);
 });
 
+// Builds one assistant message whose expanded panel holds `count` synthetic
+// spoiler rows, so the DOM walk itself (not a single <pre>) is the workload.
+function largeNodeEnv(count = 5000) {
+  const rows = Array.from({ length: count }, (_, i) =>
+    `<div><span>row ${i}</span><svg width="8" height="8"></svg></div>`).join('');
+  const html = `<div role="log"><div data-agent-transcript-message data-chat-message-id="big">`
+    + '<div><button aria-expanded="true">Ran commands</button></div>'
+    + `<div style="overflow: clip"><pre>command</pre>${rows}</div></div></div>`;
+  const env = makeEnv({ html });
+  return { ...env, message: env.AREX.messages(env.document.querySelector('[role=log]'))[0] };
+}
+
 test('asynchronous walker yields within a single message and matches synchronous output', async () => {
   const { AREX, log } = windowEnv(1); log.querySelector('button').click();
-  let yields = 0; AREX.yieldToMain = async () => { yields++; };
   const message = AREX.messages(log)[0];
   const expected = AREX.serializeMessage(message);
   const actual = await AREX.serializeMessageAsync(message, {}, 0);
-  assert.equal(actual, expected); assert.ok(yields > 1);
+  assert.equal(actual, expected);
+  // Checkpoints are amortised by 64 visited nodes: a five-element message may
+  // finish inside a single budget window, so only the big walk asserts yields.
+  const big = largeNodeEnv(1300); // > 3,900 visited elements -> several checkpoints
+  let yields = 0; big.AREX.yieldToMain = async () => { yields++; };
+  const bigExpected = big.AREX.serializeMessage(big.message);
+  const bigActual = await big.AREX.serializeMessageAsync(big.message, {}, 0);
+  assert.equal(bigActual, bigExpected);
+  assert.ok(yields > 1, `expected cooperative yields, got ${yields}`);
+});
+
+test('cooperative walker yields on a ~64-node cadence inside one 5,000-node message', async () => {
+  // 2,500 leaf rows = 5,001 elements plus their text nodes.
+  const { AREX, message } = largeNodeEnv(2500);
+  const checkpoints = [];
+  AREX.yieldToMain = async () => { checkpoints.push(true); };
+  const expected = AREX.serializeMessage(message);
+  const actual = await AREX.serializeMessageAsync(message, {}, 0);
+  assert.equal(actual, expected);
+  // ~5,001 visited elements / 64 per checkpoint ~= 78 potential yields; the
+  // bound proves the walk yields in amortised batches, never once per node.
+  assert.ok(checkpoints.length >= 30, `too few yields: ${checkpoints.length}`);
+  assert.ok(checkpoints.length <= 120, `yielded too often: ${checkpoints.length}`);
+});
+
+test('synchronous serialization visits the DOM without generators, clones or clock reads', () => {
+  const { AREX, dom } = makeEnv({ html: fixtureHtml(), url: 'https://arena.ai/agent/01a125f9-92b4-7e1a-a13a-b2e1bc5ffd61' });
+  dom.window.Node.prototype.cloneNode = () => { throw new Error('DOM clone is forbidden'); };
+  const perf = dom.window.performance;
+  const original = perf.now.bind(perf);
+  let clockReads = 0;
+  perf.now = () => { clockReads++; return original(); };
+  const md = AREX.serialize(AREX.logEl());
+  perf.now = original;
+  assert.match(md, /^- Messages: 9$/m);
+  assert.equal(clockReads, 0, 'the synchronous walker must not read the clock');
+  dom.window.close();
+});
+
+test('serializeHeader stays byte-identical unless partial metadata is requested', () => {
+  const { AREX, dom } = makeEnv({ url: 'https://arena.ai/agent/01a125f9-92b4-7e1a-a13a-b2e1bc5ffd61' });
+  const stamp = line => line.replace(/^- Exported: .*$/m, '- Exported: <ts>');
+  const plain = stamp(AREX.serializeHeader(9));
+  assert.equal(plain, stamp(AREX.serializeHeader(9, {})));
+  assert.equal(plain, stamp(AREX.serializeHeader(9, { partial: false, totalMessages: null })));
+  assert.equal(plain.split('\n').at(0).startsWith('# '), true);
+  assert.match(plain, /^- Messages: 9$/m);
+  assert.match(plain, /^---$/m);
+  assert.equal(plain.endsWith('\n'), false);
+  const partial = stamp(AREX.serializeHeader(4, { partial: true, totalMessages: 12 }));
+  assert.match(partial, /^- Messages: 4$/m);
+  assert.match(partial, /^- Status: Partial export \(4\/12 messages\)$/m);
+  // Everything else is identical apart from the inserted status line.
+  const plainFour = stamp(AREX.serializeHeader(4));
+  assert.deepEqual(partial.split('\n').filter(line => !line.startsWith('- Status:')), plainFour.split('\n'));
+  assert.match(AREX.serializeHeader(4, { partial: true }), /\(4\/\? messages\)/);
+  dom.window.close();
+});
+
+test('file chip badge extraction handles nested chrome in one pass', () => {
+  const { AREX, document } = makeEnv();
+  const { fileChip } = AREX._serializeInternals;
+  const host = document.createElement('div');
+  host.innerHTML = '<div role="button">'
+    + '<span class="select-none">7</span>'
+    + '<span><svg width="8" height="8"></svg><span>report.sh</span></span>'
+    + '<span>SHELLSCRIPT</span>'
+    + '<button aria-label="Open file"><span>SHOULD NOT APPEAR</span></button>'
+    + '<pre>ignored preview</pre></div>';
+  const chip = fileChip(host.firstElementChild);
+  assert.deepEqual({ name: chip.name, lang: chip.lang }, { name: 'report.sh', lang: 'SHELLSCRIPT' });
+});
+
+test('footer rows are detected per <time> ancestor chain only', () => {
+  const { AREX, document } = makeEnv();
+  const { footerSet, footerOf } = AREX._serializeInternals;
+  const message = document.createElement('div');
+  message.innerHTML = `
+    <div class="content"><div class="row"><span>answer</span><time>4:49 PM</time></div></div>
+    <div class="actions"><button aria-label="Copy">copy</button></div>
+    <div class="footer"><div class="meta"><button aria-label="Copy">copy</button></div>
+      <span class="timing"><time>4:50 PM</time></span></div>
+    <div class="card"><button aria-expanded="true">tool</button><time>4:51 PM</time>
+      <button aria-label="Copy">copy</button></div>`;
+  const footers = footerSet(message);
+  const footer = message.querySelector('.footer');
+  const card = message.querySelector('.card');
+  const content = message.querySelector('.content');
+  assert.equal(footers.has(footer), true);
+  // A Copy button without <time> is not a footer; content markers disqualify.
+  assert.equal(footers.has(content), false);
+  assert.equal(footers.has(card), false);
+  assert.equal(footers.has(message), false);
+  // Exact footerOf parity for the same candidate nodes.
+  for (const el of [footer, card, content, message])
+    assert.equal(footers.has(el), footerOf(el) === el, el.className || 'message');
+});
+
+test('footerSet matches the legacy per-node predicate on randomized structures', () => {
+  const { AREX, document } = makeEnv();
+  const { footerSet, footerOf } = AREX._serializeInternals;
+  // The pre-#22 semantics scanned every ancestor of every <time> with footerOf.
+  const legacy = message => {
+    const found = new Set();
+    for (const time of message.querySelectorAll('time'))
+      for (let node = time; node && node !== message; node = node.parentElement)
+        if (footerOf(node)) found.add(node);
+    return found;
+  };
+  let seed = 42;
+  const random = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const maybe = (chance, make) => { if (random() < chance) make(); };
+  const build = (depth = 0) => {
+    const el = document.createElement(['div', 'span', 'section', 'p'][Math.floor(random() * 4)]);
+    maybe(0.12, () => { const time = document.createElement('time'); time.textContent = '4:49 PM'; el.append(time); });
+    maybe(0.10, () => { const copy = document.createElement('button'); copy.setAttribute('aria-label', 'Copy'); el.append(copy); });
+    maybe(0.06, () => { const toggle = document.createElement('button'); toggle.setAttribute('aria-expanded', 'true'); el.append(toggle); });
+    maybe(0.05, () => el.append(document.createElement('pre')));
+    maybe(0.05, () => { const prose = document.createElement('div'); prose.className = 'prose'; el.append(prose); });
+    if (depth < 4) for (let i = 0, n = Math.floor(random() * 4); i < n; i += 1) el.append(build(depth + 1));
+    return el;
+  };
+  let checked = 0;
+  for (let i = 0; i < 120; i += 1) {
+    const message = build();
+    const expected = legacy(message);
+    const actual = footerSet(message);
+    for (const el of [message, ...message.querySelectorAll('*')]) {
+      checked += 1;
+      assert.equal(actual.has(el), expected.has(el), message.outerHTML.slice(0, 300));
+    }
+  }
+  assert.ok(checked > 1000, `too few elements checked: ${checked}`);
 });
