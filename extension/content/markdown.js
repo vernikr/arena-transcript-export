@@ -8,14 +8,22 @@ window.AREX = window.AREX || {};
   const collapse = s => s.replace(/ /g, ' ').replace(/[ \t]+/g, ' ');
 
   function maxRun(s, ch) {
+    const code = ch.charCodeAt(0);
     let m = 0, cur = 0;
-    for (const c of s) { cur = c === ch ? cur + 1 : 0; if (cur > m) m = cur; }
+    for (let i = 0; i < s.length; i++) {
+      if (s.charCodeAt(i) === code) { if (++cur > m) m = cur; }
+      else cur = 0;
+    }
     return m;
   }
 
-  // Fenced code block; fence grows past the longest backtick/`~` run in content.
+  // Fenced code block; fence grows past the longest backtick run in content.
   function fence(content, lang = '') {
-    const c = String(content).replace(/^\n+|\n+$/g, '');
+    let c = String(content);
+    let start = 0, end = c.length;
+    while (start < end && c.charCodeAt(start) === 10) start++;
+    while (end > start && c.charCodeAt(end - 1) === 10) end--;
+    if (start !== 0 || end !== c.length) c = c.slice(start, end);
     const n = Math.max(3, maxRun(c, '`') + 1);
     const f = '`'.repeat(n);
     return `${f}${lang}\n${c}\n${f}`;
@@ -25,11 +33,9 @@ window.AREX = window.AREX || {};
     return SKIP_TAGS.has(el.tagName) || el.matches?.(AREX.S ? AREX.S.SKIP_GUTTER : '.select-none');
   }
 
-  function inlineChildren(el) { return inlineNodes([...el.childNodes]); }
-
-  function inlineNodes(nodes) {
+  function inlineChildren(el) {
     let out = '';
-    for (const n of nodes) out += inlineNode(n);
+    for (let n = el.firstChild; n; n = n.nextSibling) out += inlineNode(n);
     return out;
   }
 
@@ -70,11 +76,12 @@ window.AREX = window.AREX || {};
   }
 
   // Block conversion: returns array of block strings.
-  function blockNodes(nodes, depth) {
+  function blockChildren(el, depth, skipNode) {
     const blocks = [];
     let inlineBuf = '';
     const flush = () => { const t = inlineBuf.replace(/\s+/g, ' ').trim(); inlineBuf = ''; if (t) blocks.push(t); };
-    for (const n of nodes) {
+    for (let n = el.firstChild; n; n = n.nextSibling) {
+      if (skipNode && n === skipNode) continue;
       if (n.nodeType === 3) { inlineBuf += inlineNode(n); continue; }
       if (n.nodeType !== 1 || skipped(n)) continue;
       if (INLINE_TAGS.has(n.tagName)) { inlineBuf += inlineNode(n); continue; }
@@ -91,29 +98,52 @@ window.AREX = window.AREX || {};
     if (!Number.isFinite(start)) start = 1;
     const pad = ' '.repeat(depth * 2);
     const out = [];
-    [...el.children].filter(c => c.tagName === 'LI').forEach((li, i) => {
-      const parts = blockNodes([...li.childNodes], 0).map(p => p.trim()).filter(Boolean);
+    let i = 0;
+    for (let li = el.firstElementChild; li; li = li.nextElementSibling) {
+      if (li.tagName !== 'LI') continue;
+      const parts = blockChildren(li, 0).map(p => p.trim()).filter(Boolean);
       const marker = ordered ? `${start + i}. ` : '- ';
-      if (!parts.length) { out.push(pad + marker.trimEnd()); return; }
-      out.push(pad + marker + parts[0].replace(/\n/g, ' '));
-      for (const rest of parts.slice(1))
-        out.push(rest.split('\n').map(l => l ? pad + '  ' + l : l).join('\n'));
-    });
+      if (!parts.length) { out.push(pad + marker.trimEnd()); }
+      else {
+        out.push(pad + marker + parts[0].replace(/\n/g, ' '));
+        for (let j = 1; j < parts.length; j++) {
+          const rest = parts[j];
+          out.push(rest.split('\n').map(l => l ? pad + '  ' + l : l).join('\n'));
+        }
+      }
+      i++;
+    }
     return out.join('\n');
   }
 
   function tableBlock(el) {
-    const rows = [...el.querySelectorAll('tr')];
+    const rows = el.querySelectorAll('tr');
     if (!rows.length) return '';
-    const cell = c => inlineNodes([...c.childNodes]).replace(/\|/g, '\\|').replace(/\n/g, '<br>').trim();
-    const lines = rows.map(r => '| ' + [...r.children].filter(c => /^(TD|TH)$/.test(c.tagName)).map(cell).join(' | ') + ' |');
-    const cols = (lines[0].match(/\|/g) || []).length - 1;
-    lines.splice(1, 0, '|' + ' --- |'.repeat(cols));
+    const rowCells = [];
+    let cols = 0;
+    for (let ri = 0; ri < rows.length; ri++) {
+      const r = rows[ri];
+      const cells = [];
+      for (let c = r.firstElementChild; c; c = c.nextElementSibling) {
+        if (c.tagName !== 'TD' && c.tagName !== 'TH') continue;
+        cells.push(inlineChildren(c).replace(/\|/g, '\\|').replace(/\n/g, '<br>').trim());
+      }
+      if (cells.length > cols) cols = cells.length;
+      rowCells.push(cells);
+    }
+    if (cols === 0) return '';
+    const lines = [];
+    for (let ri = 0; ri < rowCells.length; ri++) {
+      const cells = rowCells[ri];
+      while (cells.length < cols) cells.push('');
+      lines.push('| ' + cells.join(' | ') + ' |');
+      if (ri === 0) lines.push('|' + ' --- |'.repeat(cols));
+    }
     return lines.join('\n');
   }
 
   function blockElement(el, depth) {
-    const inner = () => blockNodes([...el.childNodes], depth);
+    const inner = () => blockChildren(el, depth);
     if (/^H[1-6]$/.test(el.tagName)) {
       const t = inlineChildren(el).replace(/\s+/g, ' ').trim();
       return t ? ['#'.repeat(+el.tagName[1]) + ' ' + t] : [];
@@ -132,13 +162,26 @@ window.AREX = window.AREX || {};
       case 'TABLE': return [tableBlock(el)];
       case 'HR': return ['---'];
       case 'DETAILS': {
-        const sum = [...el.children].find(c => c.tagName === 'SUMMARY');
-        const head = sum ? '**' + inlineNodes([...sum.childNodes]).trim() + '**' : '';
-        const rest = blockNodes([...el.childNodes].filter(c => c !== sum), depth);
+        let sum = null;
+        for (let c = el.firstElementChild; c; c = c.nextElementSibling) {
+          if (c.tagName === 'SUMMARY') { sum = c; break; }
+        }
+        const head = sum ? '**' + inlineChildren(sum).trim() + '**' : '';
+        const rest = blockChildren(el, depth, sum);
         return [head, ...rest].filter(Boolean);
       }
       case 'SUMMARY': return [];
-      case 'LI': return [listBlock({ tagName: 'UL', children: [el], getAttribute: () => null }, depth)];
+      case 'LI': {
+        const parts = blockChildren(el, 0).map(p => p.trim()).filter(Boolean);
+        const pad = ' '.repeat(depth * 2);
+        if (!parts.length) return [pad + '-'];
+        const out = [pad + '- ' + parts[0].replace(/\n/g, ' ')];
+        for (let j = 1; j < parts.length; j++) {
+          const rest = parts[j];
+          out.push(rest.split('\n').map(l => l ? pad + '  ' + l : l).join('\n'));
+        }
+        return [out.join('\n')];
+      }
       default: return inner(); // DIV/SECTION/etc: transparent container
     }
   }
@@ -150,5 +193,5 @@ window.AREX = window.AREX || {};
   }
 
   AREX.mdFence = fence;
-  AREX.mdConvert = el => blockNodes([...el.childNodes], 0).map(b => b.trim()).filter(Boolean).join('\n\n');
+  AREX.mdConvert = el => blockChildren(el, 0).map(b => b.trim()).filter(Boolean).join('\n\n');
 })();
