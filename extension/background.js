@@ -35,7 +35,7 @@ const CONTENT_FILES = [
   'content/profile.js', 'content/main.js',
 ];
 
-const CONTENT_FEATURE_VERSION = '0.5.0';
+const CONTENT_FEATURE_VERSION = '0.6.0';
 const MAX_TRACKED_JOBS = 30;
 const PROGRESS_CAP = 500;
 const SESSION_PROGRESS_CAP = 20;

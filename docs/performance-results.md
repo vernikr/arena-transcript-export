@@ -226,7 +226,7 @@ twice during this wave while every local median passed. They were tightened, not
 
 ## Compression v2 end to end (epic #1, Wave 4.1)
 
-Recorded 2026-11-26 for version 0.5.0, after the last wave wired the whole pipeline into
+Recorded 2026-11-26 for version 0.6.0, after the last wave wired the whole pipeline into
 `AREX.compressIndex` (Lossless → Smart log stage → scripts and diffs → line references → tight
 budget → framing → reasoning; see `docs/architecture.md`). Reproduce with
 `npm ci && npm test && npm run benchmark && node scripts/benchmark-compression.mjs`; pass
