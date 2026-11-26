@@ -5,14 +5,17 @@ import vm from 'node:vm';
 import { generateSyntheticCodingSession, extractInvariants, sessionByteShares } from './fixtures/synthetic-coding-session.mjs';
 
 const read = path => readFileSync(new URL('../extension/' + path, import.meta.url), 'utf8');
+// The pipeline modules, in the order popup.html loads them.
+const PIPELINE = [...read('popup/popup.html').matchAll(/<script src="\.\.\/content\/(compress[\w-]*\.js)"/g)].map(match => match[1]);
 function load() {
   const ctx = vm.createContext({});
-  for (const file of ['compress-index.js', 'compress-framing.js', 'compress.js', 'compress-stubs.js', 'compress-thoughts.js']) {
-    vm.runInContext(read('content/' + file), ctx, { filename: file });
-  }
+  for (const file of PIPELINE) vm.runInContext(read('content/' + file), ctx, { filename: file });
   return ctx.AREX;
 }
 const AREX = load();
+
+// The result before the reasoning stage, which these tests apply themselves.
+const baseResult = (raw, mode) => AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode, condenseThoughts: false });
 
 const tick = '`';
 const fence = (body, lang = 'text') => `${tick.repeat(3)}${lang}\n${body}\n${tick.repeat(3)}`;
@@ -273,15 +276,11 @@ test('condensation is idempotent', () => {
 
 const codeLines = (count = 30, tag = 'handler') =>
   Array.from({ length: count }, (_, i) => `def ${tag}_${i}(request): return validate(request, limit=${i * 7})`);
-// Stubs v2 leaves unlabeled fences that mention errors out of its own line index, so a draft like this one
-// is still left for this pass; error-free drafts are covered by the "Stubs v2" tests below.
-const errorHandlingLines = (count = 30, tag = 'handler') =>
-  [...codeLines(count - 1, tag), `except Exception: log.error('${tag} failed')`];
 const heredoc = (path, lines) => card(`$ cat > ${path} <<'EOF'\n${lines.join('\n')}\nEOF`, '(no output)');
 const draftThought = (lines, lang = 'python') =>
   thought([para('intro', 300), para('plan', 300), `Draft:\n${fence(lines.join('\n'), lang)}`]);
 const stubsPipeline = raw => {
-  const base = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'stubs' });
+  const base = baseResult(raw, 'stubs');
   return { base, result: AREX.applyThoughtCondensation(base, { mode: 'stubs' }) };
 };
 const danglingReferences = markdown => {
@@ -304,7 +303,7 @@ function referencedLines(markdown) {
 }
 
 test('Stubs replaces a draft repeated in a later file write with a reference to a new anchor', () => {
-  const lines = errorHandlingLines();
+  const lines = codeLines();
   const raw = assistant(`${draftThought(lines)}\n\n${ran(heredoc('src/widget.py', lines))}\n\nDone.`);
   const { base, result } = stubsPipeline(raw);
   assert.equal(base.stats.stubbed, 0, 'the single write has nothing to reference');
@@ -321,7 +320,7 @@ test('Stubs replaces a draft repeated in a later file write with a reference to 
   assertProtectedIntact(raw, result.markdown);
 
   // Smart never references anything and the toggle can turn the whole pass off.
-  const smart = AREX.applyThoughtCondensation(AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'smart' }), { mode: 'smart' });
+  const smart = AREX.applyThoughtCondensation(baseResult(raw, 'smart'), { mode: 'smart' });
   assert.doesNotMatch(smart.markdown, MARKER_RE);
   assert.equal(smart.stats.draftsDeduplicated, 0);
   const off = AREX.applyThoughtCondensation(base, { mode: 'stubs', condenseThoughts: false });
@@ -329,7 +328,7 @@ test('Stubs replaces a draft repeated in a later file write with a reference to 
 });
 
 test('Stubs reuses an anchor that file-output deduplication already placed', () => {
-  const lines = errorHandlingLines();
+  const lines = codeLines();
   const raw = assistant([
     draftThought(lines),
     ran(heredoc('src/widget.py', lines)),
@@ -345,7 +344,7 @@ test('Stubs reuses an anchor that file-output deduplication already placed', () 
 });
 
 test('Stubs references file artifact cards and picks fresh anchor ids', () => {
-  const lines = errorHandlingLines(24, 'artifact');
+  const lines = codeLines(24, 'artifact');
   const artifact = `#### Edited widget.py\n\n**📄 widget.py** _(python)_\n\n${fence(lines.join('\n'), 'python')}`;
   const other = codeLines(24, 'other');
   const raw = assistant([
@@ -367,11 +366,11 @@ test('draft deduplication only fires for long, worthwhile and later matches', ()
   const tiny = assistant(`${draftThought(tinyLines)}\n\n${ran(heredoc('t.py', tinyLines))}\n\nDone.`);
   assert.equal(stubsPipeline(tiny).result.stats.draftsDeduplicated, 0, 'saving below 100 bytes');
 
-  const lines = errorHandlingLines();
+  const lines = codeLines();
   const earlier = assistant(`${ran(heredoc('src/widget.py', lines))}\n\n${draftThought(lines)}\n\n${ran()}\n\nDone.`);
   assert.doesNotMatch(stubsPipeline(earlier).result.markdown, MARKER_RE, 'only later outputs are referenced');
 
-  const differs = assistant(`${draftThought(errorHandlingLines(30, 'draft'))}\n\n${ran(heredoc('src/widget.py', lines))}\n\nDone.`);
+  const differs = assistant(`${draftThought(codeLines(30, 'draft'))}\n\n${ran(heredoc('src/widget.py', lines))}\n\nDone.`);
   assert.doesNotMatch(stubsPipeline(differs).result.markdown, MARKER_RE, 'different lines never match');
 
   const otherTurn = [
@@ -389,25 +388,27 @@ test('draft deduplication only fires for long, worthwhile and later matches', ()
   assert.equal((partialResult.markdown.match(/draft identical to lines/g) || []).length, 2, 'two separate runs');
 });
 
-test('a draft that Stubs v2 already references from a later write is kept whole next to its anchor', () => {
+test('Stubs v2 never touches a Thought: its drafts are left to the reasoning pass', () => {
   const lines = codeLines();
   const raw = assistant([
-    thought([para('intro', 300), para('plan', 300), `Draft:\n${fence(lines.join('\n'), 'python')}`, para('review', 300),
-      `Usage:\n${fence('widget.render(limit=10)', 'python')}`]),
+    thought([para('intro', 300), para('plan', 300), `Draft:\n${fence(lines.join('\n'), 'python')}`]),
     ran(heredoc('src/widget.py', lines)),
     'Done.',
   ].join('\n\n'));
   const { base, result } = stubsPipeline(raw);
-  assert.equal(base.stats.stubbed, 1, 'v2 points the later write at the draft');
-  assert.match(base.markdown, /identical to lines 1–30 of earlier output #arex-stubs-output-1/);
-  assert.equal(result.stats.thoughtsCondensed, 1);
-  assert.equal(result.stats.blocksCondensed, 2, 'only the plan and review blocks around the anchored draft');
-  assert.equal(result.stats.charsCondensed, 600);
-  assert.equal(result.stats.draftsDeduplicated, 0);
-  assert.equal(result.markdown.match(/condensed \d+ intermediate reasoning blocks/g).length, 2);
+  assert.equal(base.stats.stubbed, 0, 'the draft is neither a source nor a target of Stubs matching');
+  assert.doesNotMatch(base.markdown, /arex-stubs-output/);
+  assert.equal(base.markdown, AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'stubs', condenseThoughts: false }).markdown);
+
+  // The reasoning pass points the draft at the file write, which keeps every line.
+  assert.equal(result.stats.draftsDeduplicated, 1);
+  assert.match(result.markdown, /draft identical to lines 2–31 of later output #arex-stubs-output-1/, 'line 1 of the write is its `cat >` command');
   for (const line of lines) assert.equal(result.markdown.split(line).length - 1, 1, line);
   assert.deepEqual(danglingReferences(result.markdown), []);
-  assert.ok(result.bytes < base.bytes);
+
+  // With the toggle off the Thought stays exactly as exported, anchors included.
+  const kept = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'stubs', condenseThoughts: false });
+  assert.ok(kept.markdown.includes(`Draft:\n${fence(lines.join('\n'), 'python')}`), 'the draft stays whole and unanchored');
   assertProtectedIntact(raw, result.markdown);
 });
 
@@ -427,7 +428,7 @@ test('a block that carries an output anchor is never swallowed by a condensed ru
 });
 
 test('draft deduplication leaves a fence that carries an anchor alone', () => {
-  const lines = errorHandlingLines();
+  const lines = codeLines();
   const build = anchored => assistant([
     thought([para('intro', 300), para('plan', 300),
       `Draft:\n${anchored ? '<a id="arex-stubs-output-3"></a>\n' : ''}${fence(lines.join('\n'), 'python')}`]),
@@ -490,7 +491,7 @@ test('random transcripts keep protected spans, anchored blocks and every referen
   for (let n = 0; n < 150; n++) {
     const raw = randomTranscript(rnd);
     for (const mode of ['smart', 'stubs']) {
-      const base = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode });
+      const base = baseResult(raw, mode);
       const out = AREX.applyThoughtCondensation(base, { mode });
       const label = `transcript ${n} (${mode})`;
       assertProtectedIntact(base.markdown, out.markdown);
@@ -512,7 +513,7 @@ test('random transcripts keep protected spans, anchored blocks and every referen
 
 test('applyThoughtCondensation recomputes bytes, savings and tokens and keeps the other stats', () => {
   const raw = assistant(`${thought(paras('acct', 10, 450))}\n\n${ran()}\n\nDone.`);
-  const base = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'smart' });
+  const base = baseResult(raw, 'smart');
   const out = AREX.applyThoughtCondensation(base, { mode: 'smart', condenseThoughts: true });
   assert.ok(out.markdown.length < base.markdown.length);
   assert.equal(out.bytes, bytes(out.markdown));
@@ -533,7 +534,7 @@ test('applyThoughtCondensation recomputes bytes, savings and tokens and keeps th
 test('applyThoughtCondensation reports zero for modes and toggles that do nothing', () => {
   const raw = assistant(`${thought(paras('zero', 8, 400))}\n\n${ran()}\n\nDone.`);
   for (const [mode, condenseThoughts] of [['off', true], ['lossless', true], ['lossless', false], ['smart', false], ['stubs', false]]) {
-    const base = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode });
+    const base = baseResult(raw, mode);
     const out = AREX.applyThoughtCondensation(base, { mode, condenseThoughts });
     assert.equal(out.markdown, base.markdown, `${mode}/${condenseThoughts}`);
     assert.equal(out.bytes, base.bytes);
@@ -544,7 +545,7 @@ test('applyThoughtCondensation reports zero for modes and toggles that do nothin
 
 test('applyThoughtCondensation falls back to the unchanged result when indexing fails', () => {
   const raw = assistant(`${thought(paras('fail', 8, 400))}\n\n${ran()}\n\nDone.`);
-  const base = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'smart' });
+  const base = baseResult(raw, 'smart');
 
   const failing = load();
   failing.buildDocumentIndex = () => { throw new Error('boom'); };
@@ -566,7 +567,7 @@ test('synthetic session: every mode and toggle state keeps User turns and final 
   const index = AREX.buildMarkdownIndex(raw);
   const thoughtHeadings = markdown => (markdown.match(/^#### Thought for /gm) || []).length;
   for (const mode of ['off', 'lossless', 'smart', 'stubs']) {
-    const base = AREX.compressIndex(index, { mode });
+    const base = AREX.compressIndex(index, { mode, condenseThoughts: false });
     for (const condenseThoughts of [true, false]) {
       const out = AREX.applyThoughtCondensation(base, { mode, condenseThoughts });
       const label = `${mode}/${condenseThoughts}`;
@@ -596,7 +597,7 @@ test('synthetic session: every mode and toggle state keeps User turns and final 
 
 test('synthetic session: each condensed Thought keeps its head and tail blocks in order', () => {
   const raw = generateSyntheticCodingSession();
-  const base = AREX.compressIndex(AREX.buildMarkdownIndex(raw), { mode: 'smart' });
+  const base = baseResult(raw, 'smart');
   const out = AREX.applyThoughtCondensation(base, { mode: 'smart' });
   const thoughts = markdown => AREX.buildDocumentIndex(markdown).sections
     .filter(section => section.kind === 'thought')

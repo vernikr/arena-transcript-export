@@ -37,47 +37,61 @@ globalThis.AREX = globalThis.AREX || {};
 
   const unicodeClasses = new Uint8Array(65536);
   const nonBmpClasses = new Map();
+  const UNICODE_WORD = /[\p{L}\p{N}]/u, UNICODE_SPACE = /\s/u;
+  // ASCII lookup: bits 0-1 are the class (0 space, 1 word, 2 other), bit 2 a Latin letter, bit 3 a digit.
+  const ASCII_INFO = new Uint8Array(128);
+  for (let c = 0; c < 128; c++) {
+    const latin = (c >= 65 && c <= 90) || (c >= 97 && c <= 122), digit = c >= 48 && c <= 57;
+    ASCII_INFO[c] = (latin || digit || c === 95 ? 1 : ((c >= 9 && c <= 13) || c === 32 ? 0 : 2)) | (latin ? 4 : 0) | (digit ? 8 : 0);
+  }
+
+  // Tokens of one chunk, from the counts of its characters by script.
+  function chunkTokens(length, cyrillic, cjk, latin, digits) {
+    if (cjk) return Math.ceil(cjk * 1.15) + (length > cjk ? Math.ceil((length - cjk) / 4) : 0);
+    if (cyrillic) return (cyrillic <= 3 ? 1 : Math.ceil(cyrillic / 3.4)) + (length > cyrillic ? Math.ceil((length - cyrillic) / 4) : 0);
+    if (latin) return (latin <= 7 ? 1 : Math.ceil(latin / 4.5)) + (length > latin ? Math.ceil((length - latin) / 3) : 0);
+    return digits ? Math.ceil(digits / 3) : Math.ceil(length / 4);
+  }
 
   // Same chunk boundaries and formula as the original Unicode regex estimate,
   // without constructing a potentially enormous array of matched substrings.
+  // A chunk is a run of word or of other characters; whitespace separates chunks.
   function estimateTokens(value) {
-    const unicodeWord = /[\p{L}\p{N}]/u, unicodeSpace = /\s/u;
     let total = 0, kind = 0, length = 0, cyrillic = 0, cjk = 0, latin = 0, digits = 0;
-    const flush = () => {
-      if (!length) return;
-      if (cjk) { total += Math.ceil(cjk * 1.15); if (length > cjk) total += Math.ceil((length - cjk) / 4); }
-      else if (cyrillic) { total += cyrillic <= 3 ? 1 : Math.ceil(cyrillic / 3.4); if (length > cyrillic) total += Math.ceil((length - cyrillic) / 4); }
-      else if (latin) { total += latin <= 7 ? 1 : Math.ceil(latin / 4.5); if (length > latin) total += Math.ceil((length - latin) / 3); }
-      else if (digits) total += Math.ceil(digits / 3);
-      else total += Math.ceil(length / 4);
-      length = cyrillic = cjk = latin = digits = 0;
-    };
-    for (let i = 0; i < value.length;) {
-      const cp = value.codePointAt(i), width = cp > 0xffff ? 2 : 1;
-      let next;
+    for (let i = 0, n = value.length; i < n; i++) {
+      let cp = value.charCodeAt(i);
       if (cp < 128) {
-        const word = (cp >= 65 && cp <= 90) || (cp >= 97 && cp <= 122) || (cp >= 48 && cp <= 57) || cp === 95;
-        next = word ? 1 : ((cp >= 9 && cp <= 13) || cp === 32 ? 0 : 2);
-      } else {
-        let cached = cp < 65536 ? unicodeClasses[cp] : nonBmpClasses.get(cp);
-        if (!cached) {
-          const ch = String.fromCodePoint(cp);
-          cached = unicodeWord.test(ch) ? 1 : (unicodeSpace.test(ch) ? 2 : 3);
-          if (cp < 65536) unicodeClasses[cp] = cached; else nonBmpClasses.set(cp, cached);
+        const info = ASCII_INFO[cp], next = info & 3;
+        if (next !== kind) {
+          if (length) { total += chunkTokens(length, cyrillic, cjk, latin, digits); length = cyrillic = cjk = latin = digits = 0; }
+          kind = next;
         }
-        next = cached === 1 ? 1 : (cached === 2 ? 0 : 2);
+        if (next) { length++; if (info & 4) latin++; else if (info & 8) digits++; }
+        continue;
       }
-      if (next !== kind || next === 0) { flush(); kind = next; }
+      let width = 1;
+      if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < n) {
+        const low = value.charCodeAt(i + 1);
+        if (low >= 0xDC00 && low <= 0xDFFF) { cp = ((cp - 0xD800) << 10) + (low - 0xDC00) + 0x10000; width = 2; i++; }
+      }
+      let cached = cp < 65536 ? unicodeClasses[cp] : nonBmpClasses.get(cp);
+      if (!cached) {
+        const ch = String.fromCodePoint(cp);
+        cached = UNICODE_WORD.test(ch) ? 1 : (UNICODE_SPACE.test(ch) ? 2 : 3);
+        if (cp < 65536) unicodeClasses[cp] = cached; else nonBmpClasses.set(cp, cached);
+      }
+      const next = cached === 1 ? 1 : (cached === 2 ? 0 : 2);
+      if (next !== kind) {
+        if (length) { total += chunkTokens(length, cyrillic, cjk, latin, digits); length = cyrillic = cjk = latin = digits = 0; }
+        kind = next;
+      }
       if (next) {
         length += width;
         if (cp >= 0x400 && cp <= 0x52f) cyrillic++;
         if ((cp >= 0x3040 && cp <= 0x9fff) || (cp >= 0xac00 && cp <= 0xd7af)) cjk++;
-        if ((cp >= 65 && cp <= 90) || (cp >= 97 && cp <= 122)) latin++;
-        if (cp >= 48 && cp <= 57) digits++;
       }
-      i += width;
     }
-    flush(); return total;
+    return length ? total + chunkTokens(length, cyrillic, cjk, latin, digits) : total;
   }
 
   // Split only once and retain offsets into the original. Fences are found in
@@ -240,12 +254,123 @@ globalThis.AREX = globalThis.AREX || {};
     return content;
   }
 
+  // A bare tool fence sits directly under a 📄 file card header or an activity heading, and the serializer
+  // fences unlabeled tool output as `text`. Code in prose has another shape.
+  const FILE_CARD = /^\*\*📄\s*[^*]+\*\*\s*_\([^)]+\)/;
+  const ACTIVITY_HEADING = /^#{3,6}\s+(?:used\s+\S|ran\s+commands|explored\b|edited\b)/i;
+  const TEXT_FENCE = /^(?:`{3,}|~{3,})text$/;
+  const JSON_START = /^\s*[\[{]/;
+  const SEARCH_HIT = /^[^\s:]+:\d+:/;
+  // Every stage beyond Lossless lives in its own module and is feature-detected per call: a bundle that lacks
+  // one keeps the previous behaviour for that stage instead of failing.
+  const isCallable = name => typeof AREX[name] === 'function';
+
+  // `fixed` blocks are never edited by a block stage: code inside User turns and assistant prose, which stay
+  // byte-identical in every mode, and drafts inside Thoughts, which only compress-thoughts.js may change.
+  // `doc` is the DocumentIndex of the raw Markdown, shared with later stages.
+  function guardBlocks(raw, blocks) {
+    const guard = { fixed: new Set(), doc: null };
+    for (const block of blocks) {
+      if (block.label || block.fileName) continue;
+      // Anywhere else a bare fence is code in prose or a Thought draft, which the section index cannot tell
+      // from tool output.
+      const before = (block.prefix || '').trimEnd();
+      const lead = before.slice(before.lastIndexOf('\n') + 1);
+      if (!FILE_CARD.test(lead) && !(ACTIVITY_HEADING.test(lead) && TEXT_FENCE.test((block.openLine || '').trim()))) guard.fixed.add(block);
+    }
+    if (!isCallable('buildDocumentIndex')) return guard;
+    try { guard.doc = AREX.buildDocumentIndex(raw); }
+    catch (error) { guard.fixed = { has: () => true }; return guard; } // fail closed: edit nothing
+    const ranges = [];
+    for (const turn of guard.doc.turns) {
+      if (turn.kind !== 'assistant') ranges.push(turn.startOffset, turn.endOffset);
+      else for (const span of turn.answerSpans) ranges.push(span.startOffset, span.endOffset);
+    }
+    for (let b = 0, r = 0; b < blocks.length; b++) {
+      while (r < ranges.length && ranges[r + 1] <= blocks[b].startOffset) r += 2;
+      if (r < ranges.length && ranges[r] < blocks[b].endOffset) guard.fixed.add(blocks[b]);
+    }
+    return guard;
+  }
+
+  // Estimated tokens are additive across whitespace, so an edit between whitespace changes the total by
+  // exactly estimate(new) - estimate(old). Returns null when an edit could merge two chunks.
+  const isSpace = code => (code >= 9 && code <= 13) || code === 32 || (code > 127 && /\s/u.test(String.fromCharCode(code)));
+  function spanTokenDelta(raw, edits) {
+    const sorted = [...edits].sort((a, b) => a.start - b.start);
+    let delta = 0, previousEnd = -1;
+    for (const edit of sorted) {
+      if (edit.start <= previousEnd) return null;
+      const leftOpen = edit.start === 0 || isSpace(raw.charCodeAt(edit.start - 1));
+      const rightOpen = edit.end >= raw.length || isSpace(raw.charCodeAt(edit.end));
+      const oldClosed = edit.end > edit.start && isSpace(raw.charCodeAt(edit.end - 1));
+      const newClosed = edit.text === '' || isSpace(edit.text.charCodeAt(edit.text.length - 1));
+      if (!leftOpen || !(rightOpen || (oldClosed && newClosed))) return null;
+      delta += estimateTokens(edit.text) - estimateTokens(raw.slice(edit.start, edit.end));
+      previousEnd = edit.end;
+    }
+    return delta;
+  }
+
+  // Failed runs, stderr and diagnostics keep their lines: only noise and passing-test runs are folded there.
+  function hasDiagnostic(block, body, index) {
+    if (isCallable('analyzeExecutionDiagnostics')) {
+      return AREX.analyzeExecutionDiagnostics(block, index, { cleanedBody: body, stopOnFirst: true }).hasDiagnostic;
+    }
+    return failed(block) || !!block.pairedCommand?.hasStderr || ERROR_SIGNAL.test(body);
+  }
+
+  function legacyClip(block, body) {
+    const isRead = block.pairedCommand && commandInfo(block.pairedCommand.body)?.kind === 'read';
+    const error = isRead ? (block.pairedCommand.hasStderr || EXECUTION_ERROR.test(block.body)) : ERROR_SIGNAL.test(block.body);
+    if (!error && !failed(block)) {
+      const lines = body.split('\n');
+      if ((lines.length > 110 || utf8Bytes(body) > 5500) && lines.length > 88) {
+        body = lines.slice(0, 45).concat('[... omitted ' + (lines.length - 80) + ' middle lines (exit status not reported; no error markers detected) ...]', lines.slice(-35)).join('\n');
+      }
+    }
+    return body;
+  }
+
+  function legacySmartBody(block) {
+    const body = stripTerminalNoise(block.body);
+    return block.label === 'stdout' ? legacyClip(block, collapsePassingRuns(body).text) : body;
+  }
+
+  // Smart body of a stdout/stderr block, with the Smart budget in both modes: terminal noise, then folded test
+  // runs, JSON and search hits, then the error-aware width and head/tail budget. Search and JSON reshaping is
+  // limited to blocks without diagnostics.
+  function smartBody(block, index) {
+    const strip = isCallable('stripTerminalNoise') ? AREX.stripTerminalNoise : stripTerminalNoise;
+    let body = strip(block.body);
+    if (block.label !== 'stdout') return body;
+    body = (isCallable('collapsePassingRuns') ? AREX.collapsePassingRuns : collapsePassingRuns)(body).text;
+    if (isCallable('groupSearchHits') && isCallable('stripJsonBoilerplate') &&
+        (JSON_START.test(body) || SEARCH_HIT.test(body)) && !hasDiagnostic(block, body, index)) {
+      body = AREX.groupSearchHits(AREX.stripJsonBoilerplate(body));
+    }
+    if (!isCallable('compactStdoutBlock')) return legacyClip(block, body);
+    const result = AREX.compactStdoutBlock(block, { mode: 'smart', index, body });
+    return result.changed ? result.body : body;
+  }
+
+  // The pipeline, in order. Every stage after Lossless only ever shrinks the previous result, which is what keeps
+  // Off >= Lossless >= Smart >= Stubs, and Stubs is Smart plus extra guarded stages.
+  //   Lossless  exact duplicate outputs: the first copy is anchored, later copies link to it
+  //   Smart     terminal noise, folded test runs, JSON and search hits, error-aware width and head/tail budget
+  //   Stubs     clean scripts and diffs, content-defined line references, then a tighter head/tail budget
+  //   framing   redundant wrappers and single-line command cards (Smart, Stubs)
+  //   reasoning long middle Thought blocks and drafts (Smart, Stubs; `options.condenseThoughts !== false`)
+  // User turns, assistant answers and code in prose are never edited, and Thoughts only by the last stage.
   function compressIndex(index, options = {}) {
     const mode = ['off', 'lossless', 'smart', 'stubs'].includes(options.mode) ? options.mode : 'lossless';
     const raw = index.markdown, blocks = index.blocks, baseBytes = index.bytes;
     const baseTokens = index.baseTokens ?? estimateTokens(raw);
     const stats = { deduplicated: 0, smartCompacted: 0, stubbed: 0 };
+    if (mode === 'smart' || mode === 'stubs') stats.framingCompacted = 0;
+    if (mode === 'stubs') stats.commandsShortened = 0;
     if (mode === 'off') return { markdown: raw, bytes: baseBytes, baselineBytes: baseBytes, savedBytes: 0, savedRatio: 0, estimatedTokens: baseTokens, stats };
+    const guard = guardBlocks(raw, blocks);
     let edits = new Map(), bytes = baseBytes, tokens = baseTokens;
     const setEdit = (map, block, edit) => {
       const old = map.get(block);
@@ -263,7 +388,7 @@ globalThis.AREX = globalThis.AREX || {};
 
     const seen = new Map(); let nextId = 1;
     for (const block of blocks) {
-      if (block.label === 'command' || (!block.label && !block.fileName) || block.bytes < 128) continue;
+      if (block.label === 'command' || (!block.label && !block.fileName) || block.bytes < 128 || guard.fixed.has(block)) continue;
       const h = fnv1a32(block.body);
       const key = block.bytes + ':' + h;
       const bucket = seen.get(key);
@@ -288,39 +413,75 @@ globalThis.AREX = globalThis.AREX || {};
     }
     if (bytes >= baseBytes) { edits = new Map(); bytes = baseBytes; tokens = baseTokens; stats.deduplicated = 0; }
 
+    // Smart and Stubs share one log stage; Stubs only adds guarded stages on top of it, so each can
+    // only shrink the Smart result.
+    const compacted = new Set();
+    // Lossless anchors and references are never touched; a Stubs source must stay intact for its references.
+    const frozen = block => { const edit = edits.get(block); return guard.fixed.has(block) || !!(edit && (edit.reference || edit.anchor || edit.stubAnchor)); };
     if (mode === 'smart' || mode === 'stubs') {
-      const smartEdits = new Map(edits); let smartBytes = bytes, smartTokens = tokens, count = 0;
+      const smartEdits = new Map(edits); let smartBytes = bytes, smartTokens = tokens;
       for (const block of blocks) {
-        if ((block.label !== 'stdout' && block.label !== 'stderr') || edits.get(block)?.reference || edits.get(block)?.anchor) continue;
-        let body = stripTerminalNoise(block.body);
-        if (block.label === 'stdout') {
-          body = collapsePassingRuns(body).text;
-          const isRead = block.pairedCommand && commandInfo(block.pairedCommand.body)?.kind === 'read';
-          const error = isRead ? (block.pairedCommand.hasStderr || EXECUTION_ERROR.test(block.body)) : ERROR_SIGNAL.test(block.body);
-          if (!error && !failed(block)) {
-            const lines = body.split('\n');
-            if ((lines.length > 110 || utf8Bytes(body) > 5500) && lines.length > 88) {
-              body = lines.slice(0, 45).concat('[... omitted ' + (lines.length - 80) + ' middle lines (exit status not reported; no error markers detected) ...]', lines.slice(-35)).join('\n');
-            }
-          }
-        }
+        if ((block.label !== 'stdout' && block.label !== 'stderr') || frozen(block)) continue;
+        let body;
+        try { body = smartBody(block, index); }
+        catch (error) { body = legacySmartBody(block); }
         if (body !== block.body && utf8Bytes(body) < block.bytes) {
           const [bd, td] = setEdit(smartEdits, block, { ...smartEdits.get(block), body });
-          smartBytes += bd; smartTokens += td; count++;
+          smartBytes += bd; smartTokens += td; compacted.add(block);
         }
       }
-      if (smartBytes <= bytes) { edits = smartEdits; bytes = smartBytes; tokens = smartTokens; stats.smartCompacted = count; }
+      if (smartBytes <= bytes) { edits = smartEdits; bytes = smartBytes; tokens = smartTokens; stats.smartCompacted = compacted.size; }
+      else compacted.clear();
     }
 
-    if (mode === 'stubs' && typeof AREX.compressStubs === 'function') {
-      // Path-agnostic, content-defined line deduplication (Stubs v2, issue #8).
-      // Delegated to compress-stubs.js so the algorithm, rolling seed index and
-      // cat -n / nl normalization live in their own module.
-      const reservedIds = new Set();
-      for (const match of raw.matchAll(/arex-stubs-output-(\d+)/g)) reservedIds.add(match[1]);
-      const stubbed = AREX.compressStubs(blocks, edits, bytes, tokens, setEdit, reservedIds, { mode });
-      if (stubbed.bytes <= bytes) {
-        edits = stubbed.edits; bytes = stubbed.bytes; tokens = stubbed.tokens; stats.stubbed = stubbed.stubbed;
+    if (mode === 'stubs') {
+      // Clean inline scripts and git diffs: accepted only where they beat the body the Smart stage left.
+      if (guard.doc && isCallable('compactCommands')) {
+        try {
+          const bodyAt = new Map();
+          for (const block of blocks) bodyAt.set(raw.indexOf('\n', block.startOffset) + 1, block);
+          const next = new Map(edits); let nextBytes = bytes, nextTokens = tokens, shortened = 0;
+          for (const edit of AREX.compactCommands(guard.doc, { mode }).edits) {
+            const block = bodyAt.get(edit.start);
+            if (!block || frozen(block) || edit.end - edit.start !== block.body.length) continue;
+            const current = next.get(block);
+            if (utf8Bytes(edit.text) >= utf8Bytes(current?.body ?? block.body)) continue;
+            const [bd, td] = setEdit(next, block, { ...current, body: edit.text });
+            nextBytes += bd; nextTokens += td; shortened++;
+          }
+          if (shortened && nextBytes <= bytes) { edits = next; bytes = nextBytes; tokens = nextTokens; stats.commandsShortened = shortened; }
+        } catch (error) { /* an optional stage never breaks the preview */ }
+      }
+
+      // Path-agnostic, content-defined line deduplication (Stubs v2, issue #8) runs before the tighter
+      // Stubs budget so overlapping ranges become exact references rather than omissions. Thought drafts and
+      // protected blocks take no part: they can be neither a source nor a target.
+      if (isCallable('compressStubs')) {
+        try {
+          const reservedIds = new Set();
+          for (const match of raw.matchAll(/arex-stubs-output-(\d+)/g)) reservedIds.add(match[1]);
+          const eligible = blocks.filter(block => !guard.fixed.has(block));
+          const stubbed = AREX.compressStubs(eligible, edits, bytes, tokens, setEdit, reservedIds, { mode });
+          if (stubbed.bytes <= bytes) {
+            edits = stubbed.edits; bytes = stubbed.bytes; tokens = stubbed.tokens; stats.stubbed = stubbed.stubbed;
+          }
+        } catch (error) { /* an optional stage never breaks the preview */ }
+      }
+
+      // Tighter Stubs head/tail budget for what is left. Sources of references keep every line.
+      if (isCallable('compactStdoutBlock')) {
+        const tight = new Map(edits); let tightBytes = bytes, tightTokens = tokens;
+        for (const block of blocks) {
+          if (block.label !== 'stdout' || frozen(block)) continue;
+          const current = tight.get(block);
+          let result;
+          try { result = AREX.compactStdoutBlock(block, { mode, index, body: current?.body ?? block.body }); }
+          catch (error) { continue; }
+          if (!result.changed || result.bytesAfter >= result.bytesBefore) continue;
+          const [bd, td] = setEdit(tight, block, { ...current, body: result.body });
+          tightBytes += bd; tightTokens += td; compacted.add(block);
+        }
+        if (tightBytes <= bytes) { edits = tight; bytes = tightBytes; tokens = tightTokens; stats.smartCompacted = compacted.size; }
       }
     }
 
@@ -332,18 +493,28 @@ globalThis.AREX = globalThis.AREX || {};
     }
     parts.push(raw.slice(last));
     let markdown = parts.join('');
-    if ((mode === 'smart' || mode === 'stubs') && AREX.compactFraming) {
-      // Run after output/Stubs edits so framing sees the final fences and
-      // anchors, never stale offsets or command sources referenced by Stubs.
-      const framing = AREX.compactFraming(AREX.buildDocumentIndex(markdown), { mode });
-      if (framing.byteDelta < 0) {
-        markdown = framing.markdown;
-        bytes = framing.bytes;
-        tokens = estimateTokens(markdown);
-      }
+    if ((mode === 'smart' || mode === 'stubs') && isCallable('compactFraming') && isCallable('buildDocumentIndex')) {
+      try {
+        // Runs after output/Stubs edits so framing sees the final fences and anchors, never stale offsets
+        // or command sources referenced by Stubs.
+        const framing = AREX.compactFraming(AREX.buildDocumentIndex(markdown), { mode });
+        if (framing.byteDelta < 0) {
+          const delta = spanTokenDelta(markdown, framing.edits);
+          tokens = delta === null ? estimateTokens(framing.markdown) : tokens + delta;
+          markdown = framing.markdown;
+          bytes = framing.bytes;
+          stats.framingCompacted = framing.stats.collapsedWrappers + framing.stats.emptyExplored + framing.stats.compactCommands;
+        }
+      } catch (error) { /* an optional stage never breaks the preview */ }
     }
     const savedBytes = baseBytes - bytes;
-    return { markdown, bytes, baselineBytes: baseBytes, savedBytes, savedRatio: baseBytes ? savedBytes / baseBytes : 0, estimatedTokens: tokens, stats };
+    const result = { markdown, bytes, baselineBytes: baseBytes, savedBytes, savedRatio: baseBytes ? savedBytes / baseBytes : 0, estimatedTokens: tokens, stats };
+    // Last stage, switched off with `condenseThoughts: false` (the popup worker caches that base and applies this itself).
+    if ((mode === 'smart' || mode === 'stubs') && options.condenseThoughts !== false && isCallable('applyThoughtCondensation')) {
+      try { return AREX.applyThoughtCondensation(result, { mode, condenseThoughts: options.condenseThoughts }); }
+      catch (error) { /* an optional stage never breaks the preview */ }
+    }
+    return result;
   }
 
   AREX.buildMarkdownIndex = buildMarkdownIndex;
@@ -361,8 +532,9 @@ globalThis.AREX = globalThis.AREX || {};
   AREX.formatBytes = formatBytes;
   AREX.formatByteCount = formatByteCount;
 
-  // Exposed for compress-stubs.js (issue #8): path / error helpers reused by the
-  // Stubs v2 eligibility check. Otherwise internal to compress.js.
+  // Exposed for the other pipeline modules: compress-stubs.js (issue #8) reuses the path / error helpers
+  // for its eligibility check, compress-thoughts.js the exact token delta of its span edits.
+  AREX.spanTokenDelta = spanTokenDelta;
   AREX.commandInfo = commandInfo;
   AREX.safeRead = safeRead;
   AREX.failed = failed;

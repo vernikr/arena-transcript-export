@@ -109,12 +109,47 @@ stale mode/snapshot replies and downloads the prepared result without recompress
 is unavailable or fails, a local fallback keeps exports usable but can block the popup temporarily.
 Neither path revisits the Arena DOM or repeats history paging / spoiler expansion.
 
-- **Lossless:** exact duplicate fenced tool/file outputs are anchored once; later copies become links.
-- **Smart:** strips terminal ANSI/progress noise, folds runs of at least six recognised passing-test
-  lines, and keeps the head/tail of very large clean stdout blocks. Error-signalled output is never
-  head/tail-truncated.
+`AREX.compressIndex` wires the whole pipeline. Each stage lives in its own module, is
+feature-detected per call (a bundle without a module keeps the earlier behaviour for that stage) and
+can only shrink the previous result, which is what makes `Off ≥ Lossless ≥ Smart ≥ Stubs` hold by
+construction; Stubs is Smart plus extra guarded stages. In order:
+
+| Stage | Modes | Module | What it does |
+|---|---|---|---|
+| Lossless | L S T | `compress.js` | first copy of an identical output (≥ 128 B) anchored, later copies link to it |
+| Smart log stage | S T | `compress-smart-log.js`, `compress-smart-cli.js` | terminal noise, folded passing runs, JSON/search-hit reshaping (clean blocks only), error-aware wide-line clip and head/tail budget (≤ 2.4 KB) |
+| Scripts and diffs | T | `compress-commands.js` | clean `exit 0` inline scripts and `git diff` context, kept only where they beat the Smart body |
+| Line references | T | `compress-stubs.js` | content-defined cross-block references, run *before* the tighter budget can clip a source |
+| Tight budget | T | `compress-smart-log.js` | head/tail budget ≤ 1.2 KB for blocks that are not reference sources |
+| Framing | S T | `compress-framing.js` | redundant wrappers, single-line command callouts |
+| Reasoning | S T | `compress-thoughts.js` | middle Thought blocks and drafts; skipped when `condenseThoughts` is `false` |
+
+(L = Lossless, S = Smart, T = Stubs.) Guards the stages share:
+
+- **Nothing the user wrote is edited.** `guardBlocks` fixes every block inside a User turn or an
+  assistant answer span (from the `DocumentIndex`), and every bare fence that is not tool output.
+  The serializer fences tool output as `text` directly under an activity heading
+  (`used …`, `Ran commands`, `Explored`, `Edited`) or a 📄 file card; any other bare fence is code in
+  prose or a Thought draft, which the section index cannot tell from tool output. Fixed blocks are
+  neither a reference source nor a target. If indexing fails, nothing is edited.
+- **Failing output stays whole.** The classifier in `compress-smart-log.js` keeps every line of a
+  block whose heading has a non-zero exit, that has stderr, or whose body has a traceback, failing
+  test or compiler error; reshaping (grouping, JSON) only touches blocks without diagnostics.
+- **Anchored blocks never change.** Lossless anchors, Lossless references and Stubs sources are
+  frozen for every later stage, so a line range in a marker always points at lines that exist.
+- **Thoughts have one owner.** Block stages never edit a Thought; only the last stage does.
+- **Exact accounting.** Bytes and estimated tokens are tracked per edit; the span-edit passes
+  (framing, reasoning) add the exact token delta of their edits (`AREX.spanTokenDelta`, additive
+  across whitespace) instead of re-estimating the whole document, and fall back to a full estimate
+  when an edit could merge two token chunks.
+- **A broken optional stage degrades.** Each module call is isolated: a failure skips that stage (the
+  log stage falls back to the earlier clip) and the preview still renders.
+
+The stages with their own contracts:
+
 - **Stubs (v2):** after Smart, every eligible block (`stdout`/`stderr` output, 📄 file artifact
-  cards, unlabeled tool outputs and `command` write payloads) is matched against a single bounded
+  cards, bare tool outputs and `command` write payloads; never a fixed block or a Thought fence) is
+  matched against a single bounded
   global rolling 4-line seed index built in transcript order — so matching is *content-defined and
   path-agnostic*. Compound `for f in …; do cat "$f"; done` reads, 📄 file cards and later `sed -n`
   slices deduplicate shared ≥4-line chunks without `commandInfo()` path inference. Optional `cat -n`
@@ -124,8 +159,8 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   themselves stubbed (no reference chains), and different versions / non-overlapping ranges stay
   intact. Implementation lives in `extension/content/compress-stubs.js`.
 - **Condense long reasoning (Smart/Stubs, `condenseThoughts`, default on):**
-  `content/compress-thoughts.js` post-processes the `compressIndex` result. It indexes that
-  Markdown with `AREX.buildDocumentIndex` and edits only assistant `Thought` / `Thought for …`
+  `content/compress-thoughts.js` is the last stage of `compressIndex` (`condenseThoughts: false`
+  stops before it). It indexes the Markdown the earlier stages produced with `AREX.buildDocumentIndex` and edits only assistant `Thought` / `Thought for …`
   sections through `AREX.applySpanEdits`. User turns and every assistant `answerSpan` are passed as
   protected spans, so an edit that touches them throws and the pass is dropped. A Thought is split
   into blank-line separated blocks with fenced code kept atomic. Smart (over 2,600 B, at least 5
@@ -133,27 +168,32 @@ Neither path revisits the Arena DOM or repeats history paging / spoiler expansio
   last one. Each run of middle blocks of at least 300 / 250 characters collapses to
   `_[... condensed N intermediate reasoning blocks (M chars) ...]_`. A Thought followed by no
   later activity in its turn is skipped, because prose glued to it could be the final answer.
-  Stubs v2 indexes error-free Thought fences like any other output, so a later write that repeats
-  such a draft already points back at the draft's anchor. For the drafts v2 skips (unlabeled fences
-  that mention errors), a fenced draft in a Thought is replaced piecewise (runs of at least 5
-  identical lines saving at least 100 B) by `[... draft identical to lines A–B of later output
-  #arex-stubs-output-ID ...]` when a later heredoc write or file artifact of the same turn repeats
-  it; the target gets an `arex-stubs-output-ID` anchor, reusing an existing one. A block that carries
-  an `arex-…output-N` anchor is never condensed or replaced, because other markers point at it.
+  Stubs matching never sees a Thought fence, so a fenced draft in a Thought is replaced piecewise
+  (runs of at least 5 identical lines saving at least 100 B) by `[... draft identical to lines A–B
+  of later output #arex-stubs-output-ID ...]` when a later heredoc write or file artifact of the same
+  turn repeats it; the target gets an `arex-stubs-output-ID` anchor, reusing an existing one. A block
+  that carries an `arex-…output-N` anchor is never condensed or replaced, because other markers point
+  at it. Assistant prose that directly follows a Thought without a heading of its own cannot be told
+  from the Thought in Markdown, so it is treated as part of it; its code can become such a pointer
+  when a later output repeats it verbatim, and nothing is lost either way.
   Only byte-reducing results are kept, and any failure returns the previous stage unchanged. The
   pass adds `thoughtsCondensed`, `blocksCondensed`, `charsCondensed` and `draftsDeduplicated` to
   the result stats; the popup's download summary reports `deduplicated`, `smartCompacted`,
   `stubbed` and `thoughtsCondensed`.
 - The popup persists the checkbox in `chrome.storage.sync` and sends `{ mode, condenseThoughts }`
   with `GET_MODE` / `GET_MARKDOWN`. The worker ignores the flag for Off/Lossless (always keyed
-  `:false`), computes each mode's base result once and each `${mode}:${condenseThoughts}` result
-  once, and echoes the effective flag in its replies. The popup keys its preview cache and
+  `:false`), computes each mode's base result once (`compressIndex` with `condenseThoughts: false`)
+  and each `${mode}:${condenseThoughts}` result once by applying the last stage to that base, and
+  echoes the effective flag in its replies. The popup keys its preview cache and
   stale-reply guards the same way, so toggling never rescans the Arena DOM.
 - The size card uses the final download Blob's exact byte length, displays exact UTF-8 bytes
   plus decimal KB/MB, an approximate multilingual token count, and savings against raw Markdown.
   Finder's “size on disk” is a separate filesystem allocation figure. The token estimator is
   deliberately lightweight and is not a model-specific tokenizer.
-- Each stage has a monotonicity guard: output cannot exceed the previous mode in UTF-8 bytes.
+- A stage is accepted only when it does not grow the result, so output never exceeds the previous
+  mode in UTF-8 bytes. `test/compress.test.mjs` checks this, exact byte and token accounting, and the
+  guards above on 220 generated multi-turn transcripts (`test/fixtures/random-transcript.mjs`), with
+  and without the reasoning stage.
 - The latest raw snapshot is persisted in extension IndexedDB, outside the popup's short-lived
   JavaScript memory, and keyed by `(tabId, chatUuid)` — never a global "latest". The popup queries
   `activeArenaTab()` first; a non-Arena tab gets a clean empty state (plus a banner for a job in

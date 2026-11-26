@@ -37,9 +37,13 @@
         "content/loader.js",
         "content/expand.js",
         "content/compress-index.js",
+        "content/compress-smart-log.js",
+        "content/compress-smart-cli.js",
         "content/compress-framing.js",
+        "content/compress-commands.js",
         "content/compress.js",
         "content/compress-stubs.js",
+        "content/compress-thoughts.js",
         "content/profile.js",
         "content/main.js"
       ]

@@ -7,8 +7,8 @@ import vm from 'node:vm';
 const popupHtml = readFileSync(new URL('../extension/popup/popup.html', import.meta.url), 'utf8');
 const contentScript = name => readFileSync(new URL('../extension/content/' + name, import.meta.url), 'utf8');
 const popupSource = readFileSync(new URL('../extension/popup/popup.js', import.meta.url), 'utf8');
-// Same scripts, same order as popup.html; the worker-less fallback needs all of them to condense reasoning.
-const POPUP_SCRIPTS = ['compress-index.js', 'compress-framing.js', 'compress.js', 'compress-stubs.js', 'compress-thoughts.js'];
+// Same scripts, same order as popup.html; the worker-less fallback needs all of them to compress.
+const POPUP_SCRIPTS = [...popupHtml.matchAll(/<script src="\.\.\/content\/(compress[\w-]*\.js)"/g)].map(match => match[1]);
 
 const PERFECT_PROFILE = () => ({
   profileVersion: 1,
@@ -708,7 +708,7 @@ function measureCompression(markdown, mode, condenseThoughts) {
   const context = vm.createContext({ TextEncoder });
   for (const script of POPUP_SCRIPTS) vm.runInContext(contentScript(script), context, { filename: script });
   const { AREX } = context;
-  const base = AREX.compressIndex(AREX.buildMarkdownIndex(markdown), { mode });
+  const base = AREX.compressIndex(AREX.buildMarkdownIndex(markdown), { mode, condenseThoughts: false });
   const { bytes, estimatedTokens } = AREX.applyThoughtCondensation(base, { mode, condenseThoughts });
   return { bytes, tokens: estimatedTokens };
 }
@@ -727,7 +727,8 @@ test('popup.html hosts the reasoning toggle inside #compression and loads its sc
     assert.match(checkbox.closest('label').textContent, /Condense long reasoning/);
 
     const sources = [...document.querySelectorAll('script[src]')].map(script => script.getAttribute('src'));
-    const order = ['../content/compress-index.js', '../content/compress-framing.js', '../content/compress.js',
+    const order = ['../content/compress-index.js', '../content/compress-smart-log.js', '../content/compress-smart-cli.js',
+      '../content/compress-framing.js', '../content/compress-commands.js', '../content/compress.js',
       '../content/compress-stubs.js', '../content/compress-thoughts.js', '../shared/result-store.js', 'popup.js'];
     for (const source of order) {
       assert.ok(sources.includes(source), source + ' is loaded by the popup');

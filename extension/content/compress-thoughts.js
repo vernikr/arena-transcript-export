@@ -315,7 +315,9 @@ globalThis.AREX = globalThis.AREX || {};
 
   // Post-processes an AREX.compressIndex result; an optional pass never breaks the preview.
   function applyThoughtCondensation(result, options = {}) {
-    const stats = { ...result.stats, thoughtsCondensed: 0, blocksCondensed: 0, charsCondensed: 0, draftsDeduplicated: 0 };
+    // Counters of an earlier pass over this result stay: they describe the Markdown it holds.
+    const stats = { ...result.stats };
+    for (const key of ['thoughtsCondensed', 'blocksCondensed', 'charsCondensed', 'draftsDeduplicated']) stats[key] ??= 0;
     const unchanged = { ...result, stats };
     if (!isEnabled(options) || typeof AREX.buildDocumentIndex !== 'function') return unchanged;
     let condensed;
@@ -325,15 +327,17 @@ globalThis.AREX = globalThis.AREX || {};
       return unchanged;
     }
     if (!condensed.stats.thoughtsCondensed || condensed.byteDelta >= 0) return unchanged;
-    const measured = AREX.measureMarkdown(condensed.markdown);
-    const savedBytes = result.baselineBytes - measured.bytes;
+    // Edits sit between whitespace, so the token total moves by the edits alone; a full recount is the fallback.
+    const delta = typeof AREX.spanTokenDelta === 'function' ? AREX.spanTokenDelta(result.markdown, condensed.edits) : null;
+    const estimatedTokens = delta === null ? AREX.measureMarkdown(condensed.markdown).estimatedTokens : result.estimatedTokens + delta;
+    const savedBytes = result.baselineBytes - condensed.bytes;
     return {
       ...result,
       markdown: condensed.markdown,
-      bytes: measured.bytes,
+      bytes: condensed.bytes,
       savedBytes,
       savedRatio: result.baselineBytes ? savedBytes / result.baselineBytes : 0,
-      estimatedTokens: measured.estimatedTokens,
+      estimatedTokens,
       stats: { ...stats, ...condensed.stats },
     };
   }

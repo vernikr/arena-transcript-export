@@ -37,10 +37,13 @@ function domWithSources(getSource) {
   }
   return dom;
 }
-function compressWithSource(src) {
-  if (!src) return null;
+// The compression modules, in the order popup.html loads them; a baseline ref only has compress.js.
+const pipeline = [...read('extension/popup/popup.html').matchAll(/<script src="\.\.\/content\/(compress[\w-]*\.js)"/g)].map(match => match[1]);
+function compressWithSource(...sources) {
+  if (!sources.length || sources.some(src => !src)) return null;
   const sandbox = { TextEncoder }; sandbox.window = sandbox;
-  vm.createContext(sandbox); vm.runInContext(src, sandbox);
+  vm.createContext(sandbox);
+  for (const src of sources) vm.runInContext(src, sandbox);
   return sandbox.AREX;
 }
 
@@ -81,7 +84,7 @@ if (oldDom) {
   oldDom.window.close();
 } else console.log(`Baseline ${baselineRef} unavailable locally; comparison skipped.`);
 
-const modern = compressWithSource(read('extension/content/compress.js'));
+const modern = compressWithSource(...pipeline.map(file => read('extension/content/' + file)));
 const legacy = compressWithSource(baseline('extension/content/compress.js'));
 // A deterministic ~2 MB workload made by repeating the existing committed
 // snapshot; it is deliberately duplicate-heavy and not the user's Archive.zip.

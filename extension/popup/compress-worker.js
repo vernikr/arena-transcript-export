@@ -1,5 +1,7 @@
 // One snapshot/index per popup worker. Mode results are cached for its lifetime, keyed `${mode}:${condenseThoughts}`.
-importScripts('../content/compress-index.js', '../content/compress-framing.js', '../content/compress.js', '../content/compress-stubs.js', '../content/compress-thoughts.js');
+importScripts('../content/compress-index.js', '../content/compress-smart-log.js', '../content/compress-smart-cli.js',
+  '../content/compress-framing.js', '../content/compress-commands.js', '../content/compress.js', '../content/compress-stubs.js',
+  '../content/compress-thoughts.js');
 let snapshotId = null, index = null, initError = null;
 const compressed = new Map(), cache = new Map();
 
@@ -10,7 +12,8 @@ function resultFor(message) {
   const condenseThoughts = (mode === 'smart' || mode === 'stubs') && message.condenseThoughts !== false;
   const key = `${mode}:${condenseThoughts}`;
   if (!cache.has(key)) {
-    if (!compressed.has(mode)) compressed.set(mode, AREX.compressIndex(index, { mode }));
+    // The shared base stops before the reasoning stage, so the toggle only costs that stage.
+    if (!compressed.has(mode)) compressed.set(mode, AREX.compressIndex(index, { mode, condenseThoughts: false }));
     cache.set(key, AREX.applyThoughtCondensation(compressed.get(mode), { mode, condenseThoughts }));
   }
   return { result: cache.get(key), condenseThoughts };

@@ -223,3 +223,97 @@ twice during this wave while every local median passed. They were tightened, not
   rather than to a storage defect — a hypothesis consistent with every observed pass/fail pattern,
   but not proven. If it recurs, capture `node --test test/result-store.test.mjs` output together
   with the failing assertion before touching the store.
+
+## Compression v2 end to end (epic #1, Wave 4.1)
+
+Recorded 2026-11-26 for version 0.5.0, after the last wave wired the whole pipeline into
+`AREX.compressIndex` (Lossless → Smart log stage → scripts and diffs → line references → tight
+budget → framing → reasoning; see `docs/architecture.md`). Reproduce with
+`npm ci && npm test && npm run benchmark && node scripts/benchmark-compression.mjs`; pass
+`--strict` to make a missed Worker budget fatal, or pass saved `.md` exports (files or directories)
+to measure real transcripts locally — only aggregate numbers are printed.
+
+**Methodology change.** `scripts/benchmark-compression.mjs` now loads the modules in `popup.html`
+order into the main context, which behaves like a Worker's global scope. Inside a
+`vm.createContext` sandbox, hot loops that touch globals (`Math.imul` in the Lossless hash) run about
+60× slower, so the earlier indexed-mode timings in this file (taken in such a sandbox) inflate
+compression latency and are not comparable with the table below. `npm run benchmark` and
+`benchmark:archive` still use sandboxes for like-for-like comparison with their baseline ref.
+
+Node 22.23.1, linux x64, Intel Xeon @ 2.6 GHz (a cloud sandbox, not the owner's Mac); median of
+three to five runs after a warm-up. Worker message round trips and browser memory are not measured.
+
+### Synthetic coding session (`test/fixtures/synthetic-coding-session.mjs`, 519,931 B, 125,723 est. tokens)
+
+| Mode | Bytes | Tokens | Saved | Worker time |
+|---|---:|---:|---:|---:|
+| Lossless | 444,553 | 106,950 | 14.50 % | 5.5 ms |
+| Smart, reasoning on (default) | 238,992 | 58,598 | **54.03 %** | 18.8 ms |
+| Stubs, reasoning on (default) | 218,288 | 53,929 | **58.02 %** | 16.3 ms |
+| Smart, reasoning kept | 340,421 | 81,067 | 34.53 % | 15.4 ms |
+| Stubs, reasoning kept | 336,692 | 80,172 | 35.24 % | 12.9 ms |
+
+The fixture is 26 % Thought, 47 % stdout, 19 % commands and 7 % framing by bytes. Before the wiring the
+same code reached 14.5 % / 20.9 % / 21.6 % (Lossless / Smart / Stubs) with Smart and Stubs at 40.5 % and
+44.4 % once reasoning was condensed. All four invariants of the benchmark hold in every mode and toggle
+state: every User turn, the final assistant answer, every diagnostic line and every `exit ≠ 0` heading
+survive; `Off ≥ Lossless ≥ Smart ≥ Stubs` by bytes with and without the reasoning stage; all four Stubs
+references are sound.
+
+### Worker work on a ~3.5 MB snapshot (seven distinct copies of the fixture, 3,771,783 B)
+
+| Step | Time | Saved |
+|---|---:|---:|
+| Index build, once per snapshot at INIT | 94–100 ms | — |
+| Lossless | 20–26 ms | 14.74 % |
+| Smart (including reasoning) | 79 ms | 54.36 % |
+| Stubs (including reasoning) | 98–99 ms | 58.27 % |
+| Reasoning toggle on a cached base | 19 ms | — |
+
+The budget is 120 ms per mode, and both lossy modes are within it with roughly 20 % margin on this
+slower machine (a 3.5 MB snapshot is about 7 % smaller than this input). Getting there took three
+changes inside `compress.js`: the exact token delta of the span-edit passes instead of two full-document
+re-estimates, a table-driven `estimateTokens` that is bit-identical to the old formula (checked on
+200,000 random strings) and about a quarter faster, and one shared `DocumentIndex` for the guard and
+the script stage.
+
+### What the tests pin
+
+`test/compress.test.mjs` runs 220 seeded multi-turn transcripts (`test/fixtures/random-transcript.mjs`:
+long and wide output, terminal noise, passing and failing test runs, search hits, JSON, tracebacks,
+compiler errors, stderr, diffs, scripts, reads, writes and drafts, with User and assistant code that
+repeats earlier output) through every mode and toggle state: strict byte monotonicity with exact byte
+and token accounting, User turns / answers / code in prose byte-identical, Lossless recoverable to the
+original byte for byte, no diagnostic line or failing output shortened, every Stubs and draft reference
+sound (unique anchor on the right side, range inside the source, lines repeated in the Smart output),
+Thoughts exactly as exported when the toggle is off, and a broken optional stage degrading instead of
+failing. Mutation checks confirm the tests fail without the protection, with an early tight budget,
+with a clipped reference source, and with inexact token deltas. A separate randomized test pins
+`spanTokenDelta` against full re-estimation.
+
+The generated corpus also found a real defect that predates this wave: Stubs v2 matched *any* fence, so
+a code block in a User message or a final answer could receive an anchor or be replaced by a reference
+to earlier tool output. Block stages now skip every block inside a User turn or an assistant answer and
+every bare fence that is not tool output.
+
+### Caveats and known limitations
+
+- The figures above are for a **synthetic** session. The epic's real-world target (35–55 % on long
+  Arena sessions) was not re-measured: no real exports are in the repository. Run
+  `node scripts/benchmark-compression.mjs <dir>` on saved exports to check it on your own data.
+- Without the reasoning stage Smart and Stubs reach 34.5 % and 35.2 % on this fixture, so most of the
+  gap between Lossless and the targets is Thought condensation (26 % of the bytes) and log budgets.
+- The script and diff stage (`compress-commands.js`) only fires on runs whose heading says
+  `exit 0`. Real Arena exports print an exit code only on failure (in
+  `test/snapshots/fixture-expected.md`, 16 of 96 Bash headings carry `exit N` and none carry
+  `exit 0`), so on real data that stage is currently inactive; the fixture shows 0 shortened scripts
+  for the same reason. The tests exercise it with explicit `exit 0` headings. Treating a heading without
+  an exit marker as success would activate it, which is a decision for that module's owner.
+- A bare fence counts as tool output only directly under an activity heading or a 📄 card. Output
+  that Arena splits into further unlabeled chunks is left alone, which can forgo a reference but never
+  rewrites prose.
+- Assistant prose that directly follows a Thought has no heading of its own and is treated as part of
+  the Thought (its code can become a pointer to an identical later output); the final answer after the
+  last activity is never touched.
+- Latency was measured on a cloud CPU in Node, not in Chrome; the Worker round trip and structured
+  clone of results are additional.

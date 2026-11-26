@@ -55,7 +55,7 @@ const MODE_DESCRIPTIONS = {
   off: 'Raw Markdown: no deduplication, compaction or reasoning changes are applied.',
   lossless: 'Exact duplicate outputs are kept once and replaced by links to the original block. Reasoning is never changed.',
   smart: 'Lossless + removes terminal noise, folds long passing-test runs and trims very long clean logs. Error output is preserved.',
-  stubs: 'Smart + references identical lines in earlier file outputs; Smart can still omit unique lines.',
+  stubs: 'Smart + references identical lines in earlier outputs, shortens clean scripts and trims logs harder; unique lines can still be omitted.',
 };
 const REASONING_NOTES = {
   condensed: ' Long middle reasoning blocks are condensed; your messages and final answers are never changed.',
@@ -811,7 +811,7 @@ function fallbackResult(state, mode, condense) {
   const key = modeKey(mode, condense);
   if (!state.fallbackResults.has(key)) {
     state.fallbackIndex ||= AREX.buildMarkdownIndex(state.snapshot.markdown);
-    if (!state.fallbackBase.has(mode)) state.fallbackBase.set(mode, AREX.compressIndex(state.fallbackIndex, { mode }));
+    if (!state.fallbackBase.has(mode)) state.fallbackBase.set(mode, AREX.compressIndex(state.fallbackIndex, { mode, condenseThoughts: false }));
     const base = state.fallbackBase.get(mode);
     state.fallbackResults.set(key, AREX.applyThoughtCondensation
       ? AREX.applyThoughtCondensation(base, { mode, condenseThoughts: condense })

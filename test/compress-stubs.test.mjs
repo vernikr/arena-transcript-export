@@ -190,7 +190,9 @@ test('Stubs keeps unique versions and non-overlapping ranges fully intact', () =
   assert.equal(stubs.stats.stubbed, 0, 'distinct versions must not be linked');
   assert.match(stubs.markdown, /OLD_59/);
   assert.match(stubs.markdown, /NEW_59/);
-  assert.equal(stubs.markdown, smart.markdown);
+  // Stubs only adds its tighter head/tail budget on top of Smart here; nothing references anything.
+  assert.doesNotMatch(stubs.markdown, /arex-stubs-output|identical to lines/);
+  assert.ok(stubs.bytes <= smart.bytes);
   dom.window.close();
 });
 

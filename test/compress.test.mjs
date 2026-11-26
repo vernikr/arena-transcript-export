@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { makeEnv } from './harness.mjs';
+import { randomTranscriptWithMeta } from './fixtures/random-transcript.mjs';
 
 const fence = String.fromCharCode(96).repeat(3);
 const fenced = (body, lang = 'text') => fence + lang + '\n' + body + '\n' + fence;
@@ -444,3 +447,408 @@ test('strict byte monotonicity Off >= Lossless >= Smart >= Stubs', () => {
   }
   dom.window.close();
 });
+
+// --- End-to-end pipeline (Wave 4.1) ----------------------------------------------------------------------------
+//
+// The whole stack is loaded the way popup.html loads it, into the main context, which behaves like a Worker's
+// global scope: hot loops stay fast, so a few hundred generated transcripts run in seconds.
+
+const extensionFile = path => readFileSync(new URL('../extension/' + path, import.meta.url), 'utf8');
+const scriptsOf = (source, pattern) => [...source.matchAll(pattern)].map(match => match[1]);
+const PIPELINE = scriptsOf(extensionFile('popup/popup.html'), /<script src="\.\.\/content\/(compress[\w-]*\.js)"/g);
+for (const file of PIPELINE) vm.runInThisContext(extensionFile('content/' + file), { filename: file });
+const P = globalThis.AREX;
+
+const MODES = ['off', 'lossless', 'smart', 'stubs'];
+const utf8 = text => Buffer.byteLength(text);
+const CORPUS_SIZE = 220;
+
+// Every transcript is compressed once per mode and per toggle state, then shared by the property tests below.
+const corpus = new Map();
+function sample(seed) {
+  if (!corpus.has(seed)) {
+    const { markdown: raw, proseFences, gluedFences } = randomTranscriptWithMeta(seed);
+    const index = P.buildMarkdownIndex(raw);
+    const doc = P.buildDocumentIndex(raw);
+    const results = Object.fromEntries(MODES.map(mode => [mode, P.compressIndex(index, { mode })]));
+    const kept = Object.fromEntries(['smart', 'stubs'].map(mode => [mode, P.compressIndex(index, { mode, condenseThoughts: false })]));
+    corpus.set(seed, { seed, raw, proseFences, gluedFences, index, doc, results, kept });
+  }
+  return corpus.get(seed);
+}
+const eachSample = fn => { for (let seed = 1; seed <= CORPUS_SIZE; seed++) fn(sample(seed)); };
+
+// The text no mode may change: User turns and assistant answer spans, in document order.
+function protectedTexts({ raw, doc }) {
+  const texts = [];
+  for (const turn of doc.turns) {
+    if (turn.kind === 'user') texts.push(raw.slice(turn.startOffset, turn.endOffset));
+    else for (const span of turn.answerSpans) texts.push(raw.slice(span.startOffset, span.endOffset));
+  }
+  return texts;
+}
+
+test('the pipeline modules load in dependency order and match across manifest, background, popup, worker and harness', () => {
+  const wanted = ['compress-index.js', 'compress-smart-log.js', 'compress-smart-cli.js', 'compress-framing.js',
+    'compress-commands.js', 'compress.js', 'compress-stubs.js', 'compress-thoughts.js'];
+  assert.deepEqual(PIPELINE, wanted, 'popup.html');
+  const manifest = JSON.parse(extensionFile('manifest.json')).content_scripts[0].js;
+  const lists = {
+    manifest: manifest.filter(file => /compress/.test(file)).map(file => file.replace('content/', '')),
+    background: scriptsOf(extensionFile('background.js').match(/const CONTENT_FILES = \[[\s\S]*?\];/)[0], /'content\/(compress[\w-]*\.js)'/g),
+    worker: scriptsOf(extensionFile('popup/compress-worker.js').match(/importScripts\([\s\S]*?\);/)[0], /'\.\.\/content\/(compress[\w-]*\.js)'/g),
+    harness: scriptsOf(readFileSync(new URL('./harness.mjs', import.meta.url), 'utf8').match(/const FILES = \[[\s\S]*?\];/)[0], /'(compress[\w-]*)'/g).map(name => name + '.js'),
+  };
+  for (const [where, list] of Object.entries(lists)) assert.deepEqual(list, wanted, where);
+  for (const file of wanted) assert.ok(extensionFile('content/' + file).length > 0, file);
+  // The in-tab bundle keeps compress.js after the modules it feature-detects and before profile.js and main.js.
+  assert.ok(manifest.indexOf('content/compress-thoughts.js') < manifest.indexOf('content/profile.js'));
+});
+
+test('a generated corpus exercises every stage', () => {
+  const totals = { deduplicated: 0, smartCompacted: 0, stubbed: 0, framingCompacted: 0, commandsShortened: 0, thoughtsCondensed: 0, draftsDeduplicated: 0 };
+  eachSample(({ results }) => {
+    for (const key of Object.keys(totals)) totals[key] += results.stubs.stats[key] || 0;
+  });
+  for (const [key, value] of Object.entries(totals)) assert.ok(value >= 10, `${key} fired ${value} times`);
+});
+
+test('strict byte monotonicity Off >= Lossless >= Smart >= Stubs holds with exact accounting on generated transcripts', () => {
+  eachSample(({ seed, raw, results, kept }) => {
+    const label = 'transcript ' + seed;
+    assert.equal(results.off.markdown, raw, label + ': Off is the raw Markdown');
+    for (const mode of MODES) {
+      const result = results[mode];
+      assert.equal(result.bytes, utf8(result.markdown), `${label} ${mode}: bytes`);
+      assert.equal(result.baselineBytes, utf8(raw), `${label} ${mode}: baseline`);
+      assert.equal(result.savedBytes, result.baselineBytes - result.bytes, `${label} ${mode}: saved`);
+      assert.equal(result.estimatedTokens, P.measureMarkdown(result.markdown).estimatedTokens, `${label} ${mode}: tokens`);
+    }
+    for (let i = 1; i < MODES.length; i++) {
+      assert.ok(results[MODES[i]].bytes <= results[MODES[i - 1]].bytes, `${label}: ${MODES[i]} <= ${MODES[i - 1]}`);
+    }
+    // The same chain holds without the reasoning stage, which can only add savings on top.
+    assert.ok(kept.smart.bytes <= results.lossless.bytes, label + ': Smart without reasoning <= Lossless');
+    assert.ok(kept.stubs.bytes <= kept.smart.bytes, label + ': Stubs without reasoning <= Smart without reasoning');
+    assert.ok(results.smart.bytes <= kept.smart.bytes && results.stubs.bytes <= kept.stubs.bytes, label + ': reasoning only shrinks');
+    assert.equal(kept.stubs.estimatedTokens, P.measureMarkdown(kept.stubs.markdown).estimatedTokens, label + ': tokens without reasoning');
+  });
+});
+
+test('User turns, final answers and code in prose stay byte-identical in every mode and toggle state', () => {
+  eachSample(sampleData => {
+    const { seed, raw, proseFences, results, kept } = sampleData;
+    const texts = protectedTexts(sampleData);
+    assert.ok(texts.length > 0 && proseFences.length >= 0);
+    for (const [name, result] of [...Object.entries(results), ['smart (reasoning kept)', kept.smart], ['stubs (reasoning kept)', kept.stubs]]) {
+      let cursor = 0;
+      for (const text of texts) {
+        const at = result.markdown.indexOf(text, cursor);
+        assert.ok(at >= 0, `transcript ${seed} ${name}: protected text changed: ${JSON.stringify(text.slice(0, 70))}`);
+        cursor = at + text.length;
+      }
+      for (const fence of proseFences) {
+        assert.ok(result.markdown.includes(fence), `transcript ${seed} ${name}: code in prose changed: ${JSON.stringify(fence.slice(0, 70))}`);
+      }
+    }
+  });
+});
+
+test('Stubs never rewrites code in a User message or a final answer, even when it repeats earlier output', () => {
+  const lines = Array.from({ length: 30 }, (_, i) => `def handler_${i}(request): return validate(request, limit=${i * 7})`);
+  const code = fenced(lines.join('\n'), 'python');
+  const raw = [
+    '# Branch',
+    `## 👤 User\n\nHere is the file:\n\n${code}\n\nplease review it`,
+    `## 🤖 Assistant\n\n#### Used Read src/widget.py 5ms\n\n${fenced(lines.join('\n'))}\n\nLooks fine. Here it is again:\n\n${code}\n\nDone.`,
+  ].join('\n\n');
+  const index = P.buildMarkdownIndex(raw);
+  for (const mode of MODES) {
+    const { markdown } = P.compressIndex(index, { mode });
+    assert.equal(markdown.split(code).length - 1, 2, `${mode}: both quotes of the code are intact`);
+    assert.ok(markdown.includes('please review it') && markdown.endsWith('Done.'), mode);
+    assert.doesNotMatch(markdown, /identical to lines/, mode);
+  }
+  // The Read output on its own is still a legitimate source: nothing in this transcript repeats it as tool output.
+  assert.equal(P.compressIndex(index, { mode: 'stubs' }).stats.stubbed, 0);
+});
+
+test('a tool card pasted into a User message is never linked, anchored or clipped', () => {
+  const log = Array.from({ length: 140 }, (_, i) => `build step ${i} finished ${'ok'.repeat(10)}`).join('\n');
+  const card = `**stdout:**\n\n${fenced(log)}`;
+  const raw = [
+    '## 👤 User',
+    `This is what the build printed:\n\n${card}\n\nWhy is it slow?`,
+    '## 🤖 Assistant',
+    `#### used Bash 90ms\n\n${card}`,
+    `#### used Bash 91ms\n\n${card}`,
+    'It prints one line per step.',
+  ].join('\n\n');
+  const pasted = `This is what the build printed:\n\n${card}\n\nWhy is it slow?`;
+  for (const mode of MODES) {
+    const result = P.compressMarkdown(raw, { mode });
+    assert.ok(result.markdown.includes(pasted), `${mode}: the message is intact`);
+    assert.ok(result.markdown.endsWith('It prints one line per step.'), mode);
+    if (mode !== 'off') assert.ok(result.bytes < result.baselineBytes, `${mode}: the tool output itself still shrinks`);
+  }
+  assert.equal(P.compressMarkdown(raw, { mode: 'lossless' }).stats.deduplicated, 1, 'the two tool cards still link to each other');
+});
+
+test('token deltas of span edits are exact when the edits sit between whitespace, and refused otherwise', () => {
+  let seed = 4242;
+  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  const atoms = ['alpha', 'x', 'Привет', '漢字かな', '한국어', '🌍', '12345', 'snake_case', '!?', '...', 'é', '́'];
+  const gaps = [' ', '\n', '  ', '\t', ' ', ''];
+  const piece = () => atoms[Math.floor(random() * atoms.length)] + (random() < 0.5 ? atoms[Math.floor(random() * atoms.length)] : '');
+  let exact = 0, refused = 0;
+  for (let run = 0; run < 600; run++) {
+    let raw = '';
+    for (let i = 0, n = 6 + Math.floor(random() * 20); i < n; i++) raw += piece() + gaps[Math.floor(random() * gaps.length)];
+    // Half of the runs put every edit between whitespace; the others cut at arbitrary offsets.
+    const aligned = random() < 0.5;
+    const isGap = index => index <= 0 || index >= raw.length || /\s/u.test(raw[index - 1]) || /\s/u.test(raw[index]);
+    const edits = [];
+    let at = 0;
+    while (at < raw.length && edits.length < 4) {
+      let start = at + Math.floor(random() * 12), end = start + Math.floor(random() * 14);
+      if (aligned) {
+        while (start < raw.length && !(start === 0 || /\s/u.test(raw[start - 1]))) start++;
+        end = Math.max(end, start);
+        while (end < raw.length && !/\s/u.test(raw[end])) end++;
+      }
+      if (end > raw.length || (aligned && !isGap(start))) break;
+      edits.push({ start, end, text: random() < 0.2 ? '' : piece() + gaps[Math.floor(random() * gaps.length)] + piece() });
+      at = end + 1 + Math.floor(random() * 3);
+    }
+    const delta = P.spanTokenDelta(raw, edits);
+    if (delta === null) { refused++; continue; }
+    let next = '', last = 0;
+    for (const edit of [...edits].sort((a, b) => a.start - b.start)) { next += raw.slice(last, edit.start) + edit.text; last = edit.end; }
+    next += raw.slice(last);
+    assert.equal(P.measureMarkdown(next).estimatedTokens - P.measureMarkdown(raw).estimatedTokens, delta, JSON.stringify({ raw, edits }));
+    exact++;
+  }
+  assert.ok(exact > 50 && refused > 50, `${exact} exact, ${refused} refused`);
+  assert.equal(P.spanTokenDelta('foo bar', [{ start: 1, end: 2, text: 'xyz' }]), null, 'a neighbour that could join the chunk');
+  assert.equal(P.spanTokenDelta('a b c', [{ start: 0, end: 2, text: '' }, { start: 2, end: 3, text: 'z' }]), null, 'touching edits');
+  assert.equal(P.spanTokenDelta('one two three', [{ start: 4, end: 7, text: 'twelve' }]), P.measureMarkdown('one twelve three').estimatedTokens - P.measureMarkdown('one two three').estimatedTokens);
+});
+
+test('bare fences are Stubs candidates only as tool output: under an activity heading or a file card', () => {
+  const lines = Array.from({ length: 24 }, (_, i) => `line ${i} of the shared body ${'z'.repeat(20)}`);
+  const body = lines.join('\n');
+  const tool = [`#### Used Read a.ts 4ms\n\n${fenced(body)}`, `#### Used Read b.ts 4ms\n\n${fenced(body)}`].join('\n\n');
+  assert.equal(P.compressMarkdown(tool, { mode: 'stubs' }).stats.stubbed, 1, 'two reads under activity headings link');
+
+  const card = `**📄 config.ts** _(TS)_\n\n${fenced(body, 'ts')}\n\n#### Used Read b.ts 4ms\n\n${fenced(body)}`;
+  assert.equal(P.compressMarkdown(card, { mode: 'stubs' }).stats.stubbed, 1, 'a file card and a read link');
+
+  const shapes = {
+    'under a prose heading': `### Summary\n\n${fenced(body)}\n\n#### Used Read b.ts 4ms\n\n${fenced(body)}`,
+    'after a paragraph': `The file reads:\n\n${fenced(body)}\n\n#### Used Read b.ts 4ms\n\n${fenced(body)}`,
+    'with a language': `#### Used Read a.ts 4ms\n\n${fenced(body, 'ts')}\n\n#### Used Read b.ts 4ms\n\n${fenced(body)}`,
+    'after a Thought heading': `#### Thought for 3s\n\n${fenced(body)}\n\n#### Used Read b.ts 4ms\n\n${fenced(body)}`,
+  };
+  for (const [name, raw] of Object.entries(shapes)) {
+    const result = P.compressMarkdown(raw, { mode: 'stubs', condenseThoughts: false });
+    assert.equal(result.stats.stubbed, 0, name);
+    assert.doesNotMatch(result.markdown, /arex-stubs-output|identical to lines/, name);
+  }
+});
+
+test('Lossless anchors the first copy untouched and every reference expands back to the original document', () => {
+  eachSample(({ seed, raw, index, results }) => {
+    const output = results.lossless.markdown;
+    const anchored = [...output.matchAll(/<a id="arex-output-(\d+)"><\/a>\n/g)];
+    const references = [...output.matchAll(/_Identical to \[output #(\d+)\]\(#arex-output-\1\) — byte-for-byte match\._/g)];
+    assert.equal(references.length, results.lossless.stats.deduplicated, `transcript ${seed}: reference count`);
+    assert.equal(new Set(anchored.map(match => match[1])).size, anchored.length, `transcript ${seed}: anchors are unique`);
+    for (const reference of references) assert.ok(anchored.some(match => match[1] === reference[1]), `transcript ${seed}: #${reference[1]} resolves`);
+
+    // Undo the edits: drop the anchors and put each duplicate's original block back, in document order.
+    const duplicates = [];
+    const firstBody = new Set();
+    for (const block of index.blocks) {
+      if (block.label === 'command' || (!block.label && !block.fileName) || block.bytes < 128) continue;
+      if (firstBody.has(block.body)) duplicates.push(raw.slice(block.startOffset, block.endOffset)); else firstBody.add(block.body);
+    }
+    if (!references.length) return assert.equal(output, raw, `transcript ${seed}: nothing to link, nothing changes`);
+    assert.equal(duplicates.length, references.length, `transcript ${seed}: one reference per duplicate`);
+    let next = 0;
+    const restored = output
+      .replace(/<a id="arex-output-\d+"><\/a>\n/g, '')
+      .replace(/_Identical to \[output #\d+\]\(#arex-output-\d+\) — byte-for-byte match\._/g, () => duplicates[next++]);
+    assert.equal(restored, raw, `transcript ${seed}: the original is recoverable byte for byte`);
+  });
+});
+
+test('Smart and Stubs never drop an execution diagnostic or shorten failing output', () => {
+  const DIAGNOSTIC = /^(?:Traceback \(most recent call last\):|\s+File ".*", line \d+|[A-Za-z]*Error: .*|E {3}.*|FAILED .*|=== FAILURES ===|npm ERR!.*|cat: .*No such file.*|src\/a\.c:\d+:\d+: error:.*)$/;
+  let checked = 0;
+  eachSample(({ seed, index, results }) => {
+    const diagnostics = [];
+    for (const block of index.blocks) {
+      if (block.label !== 'stdout' && block.label !== 'stderr') continue;
+      for (const line of block.body.split('\n')) if (DIAGNOSTIC.test(line)) diagnostics.push(line);
+    }
+    for (const mode of ['smart', 'stubs']) {
+      const lines = new Set(results[mode].markdown.split('\n'));
+      for (const line of diagnostics) { checked++; assert.ok(lines.has(line), `transcript ${seed} ${mode}: lost ${JSON.stringify(line)}`); }
+    }
+    // A failing run (exit heading) or one with stderr keeps its whole output, bar terminal noise and passing runs.
+    for (const block of index.blocks) {
+      if (block.label !== 'stdout' && block.label !== 'stderr') continue;
+      const failing = /\bexit\s+[1-9]/.test(block.activity) || block.label === 'stderr' || block.pairedCommand?.hasStderr;
+      const lines = P.stripTerminalNoise(block.body).split('\n');
+      if (!failing || lines.length > 100 || lines.some(line => /\[ *\d+%\]$/.test(line))) continue;
+      for (const mode of ['smart', 'stubs']) {
+        const kept = new Set(results[mode].markdown.split('\n'));
+        for (const line of lines) assert.ok(kept.has(line), `transcript ${seed} ${mode}: failing output lost ${JSON.stringify(line.slice(0, 60))}`);
+      }
+    }
+  });
+  assert.ok(checked > 200, 'the corpus carries plenty of diagnostics');
+});
+
+test('every Stubs and draft reference points at an earlier anchor, inside the source, at lines the Smart output repeats', () => {
+  let stubs = 0, drafts = 0;
+  const sourceOf = (markdown, id) => {
+    const anchor = `<a id="${id}"></a>\n`;
+    const at = markdown.indexOf(anchor);
+    assert.ok(at >= 0, 'anchor ' + id);
+    assert.equal(markdown.indexOf(anchor, at + 1), -1, 'anchor ' + id + ' is unique');
+    const after = markdown.slice(at + anchor.length).replace(/^(?:<a id="[^"]+"><\/a>\n)+/, '');
+    const open = /^\s*(`{3,}|~{3,})[^\n]*\n/.exec(after);
+    assert.ok(open, 'anchor ' + id + ' sits above a fence');
+    return { at, lines: after.slice(open[0].length, after.indexOf('\n' + open[1], open[0].length)).split('\n') };
+  };
+  eachSample(({ seed, results, kept }) => {
+    const smart = kept.smart.markdown;
+    for (const mode of ['smart', 'stubs']) {
+      const markdown = results[mode].markdown;
+      if (mode === 'smart') assert.doesNotMatch(markdown, /arex-stubs-output/, `transcript ${seed}: Smart has no Stubs markers`);
+      for (const match of markdown.matchAll(/\[\.\.\. identical to lines (\d+)–(\d+) of earlier output #(arex-stubs-output-\d+)( \(excluding line numbers\))? \.\.\.\]/g)) {
+        stubs++;
+        const { at, lines } = sourceOf(markdown, match[3]);
+        const [from, to] = [Number(match[1]), Number(match[2])];
+        assert.ok(at < match.index, `transcript ${seed}: ${match[3]} is earlier than its reference`);
+        assert.ok(from >= 1 && to >= from && to <= lines.length, `transcript ${seed}: lines ${from}–${to} of ${lines.length}`);
+        if (!match[4]) assert.ok(smart.split(lines.slice(from - 1, to).join('\n')).length - 1 >= 2, `transcript ${seed}: the range is repeated`);
+      }
+      for (const match of markdown.matchAll(/\[\.\.\. draft identical to lines (\d+)–(\d+) of later output #(arex-stubs-output-\d+) \.\.\.\]/g)) {
+        drafts++;
+        const { at, lines } = sourceOf(markdown, match[3]);
+        const [from, to] = [Number(match[1]), Number(match[2])];
+        assert.ok(at > match.index, `transcript ${seed}: ${match[3]} is later than its draft`);
+        assert.ok(from >= 1 && to >= from && to <= lines.length, `transcript ${seed}: draft lines ${from}–${to} of ${lines.length}`);
+        assert.ok(smart.split(lines.slice(from - 1, to).join('\n')).length - 1 >= 2, `transcript ${seed}: the draft is repeated`);
+      }
+    }
+  });
+  assert.ok(stubs > 100 && drafts > 20, `the corpus has ${stubs} Stubs and ${drafts} draft references`);
+});
+
+test('with the toggle off every Thought is exactly as exported, and only Smart and Stubs react to it', () => {
+  eachSample(({ seed, raw, doc, index, results, kept }) => {
+    const thoughts = doc.sections.filter(section => section.kind === 'thought').map(section => raw.slice(section.startOffset, section.endOffset));
+    for (const mode of ['smart', 'stubs']) {
+      for (const thought of thoughts) assert.ok(kept[mode].markdown.includes(thought), `transcript ${seed} ${mode}: a Thought changed with the toggle off`);
+      assert.equal(kept[mode].stats.thoughtsCondensed, undefined, `${mode}: the stage did not run`);
+    }
+    for (const mode of ['off', 'lossless']) {
+      assert.equal(P.compressIndex(index, { mode, condenseThoughts: true }).markdown, results[mode].markdown, `${mode} ignores the toggle`);
+    }
+    assert.equal(P.compressIndex(index, { mode: 'stubs' }).markdown, results.stubs.markdown, `transcript ${seed}: deterministic`);
+  });
+});
+
+test('the reasoning stage runs last: applying it to the shared base gives the integrated result', () => {
+  eachSample(({ seed, results, kept }) => {
+    for (const mode of ['smart', 'stubs']) {
+      const applied = P.applyThoughtCondensation(kept[mode], { mode, condenseThoughts: true });
+      assert.equal(applied.markdown, results[mode].markdown, `transcript ${seed} ${mode}`);
+      assert.equal(applied.bytes, results[mode].bytes);
+      assert.equal(applied.estimatedTokens, results[mode].estimatedTokens);
+      // A second application leaves the result, and the counters that describe it, alone.
+      const again = P.applyThoughtCondensation(results[mode], { mode, condenseThoughts: true });
+      assert.equal(again.markdown, results[mode].markdown);
+      assert.equal(again.stats.thoughtsCondensed, results[mode].stats.thoughtsCondensed);
+    }
+  });
+});
+
+test('Stubs links overlapping reads before its tighter budget can clip the source', () => {
+  const source = Array.from({ length: 60 }, (_, i) => `source line ${i} = 'abcdefghijk'`);
+  const first = source.slice(0, 40).join('\n');
+  const second = source.slice(10, 40).join('\n') + '\nONLY_SECOND';
+  const run = (command, output) => `#### used Bash 1ms\n\n**command:**\n\n${fenced(command, 'bash')}\n\n**stdout:**\n\n${fenced(output)}`;
+  const raw = [run('$ sed -n 1,40p service.py', first), run('$ sed -n 11,40p service.py', second)].join('\n\n');
+  const smart = P.compressMarkdown(raw, { mode: 'smart' });
+  const stubs = P.compressMarkdown(raw, { mode: 'stubs' });
+  assert.equal(stubs.stats.stubbed, 1);
+  assert.ok(stubs.bytes < smart.bytes);
+  for (const line of source.slice(0, 40)) assert.equal(stubs.markdown.split(line).length - 1, 1, 'the source keeps every line exactly once: ' + line);
+  assert.match(stubs.markdown, /ONLY_SECOND/);
+  assert.match(stubs.markdown, /identical to lines 11–40 of earlier output #arex-stubs-output-1/);
+});
+
+test('without the optional modules each mode keeps its earlier behaviour', () => {
+  const load = files => {
+    const context = vm.createContext({ TextEncoder });
+    for (const file of files) vm.runInContext(extensionFile('content/' + file), context, { filename: file });
+    return context.AREX;
+  };
+  const noisy = Array.from({ length: 140 }, (_, i) => `row ${i} ${'x'.repeat(30)}`).join('\n');
+  const passes = Array.from({ length: 12 }, (_, i) => `✓ suite > test-${i} [1.00ms]`).join('\n');
+  const raw = `#### used Bash 1ms\n\n${outputBlock(noisy)}\n\n#### used Bash 2ms\n\n${outputBlock(passes)}`;
+  for (const files of [['compress.js'], ['compress-index.js', 'compress.js'], ['compress-index.js', 'compress-framing.js', 'compress.js', 'compress-stubs.js']]) {
+    const arex = load(files);
+    const index = arex.buildMarkdownIndex(raw);
+    const results = MODES.map(mode => arex.compressIndex(index, { mode }));
+    for (let i = 0; i < results.length; i++) {
+      assert.equal(results[i].bytes, utf8(results[i].markdown), files.join('+') + ' ' + MODES[i]);
+      assert.ok(i === 0 || results[i].bytes <= results[i - 1].bytes, files.join('+') + ' monotonic');
+    }
+    assert.match(results[2].markdown, /omitted \d+ middle lines/, files.join('+') + ': the earlier clip still runs');
+    assert.match(results[2].markdown, /collapsed 12 passing test lines/, files.join('+'));
+    assert.equal(results[3].stats.thoughtsCondensed, undefined, files.join('+') + ': no reasoning stage');
+  }
+  // The whole bundle shrinks the same input further.
+  const full = P.compressMarkdown(raw, { mode: 'smart' });
+  assert.ok(full.bytes < load(['compress.js']).compressMarkdown(raw, { mode: 'smart' }).bytes);
+});
+
+test('a broken optional stage degrades to the previous stage instead of failing the preview', () => {
+  const rows = tag => Array.from({ length: 140 }, (_, i) => `${tag} ${i} ${'x'.repeat(30)}`).join('\n');
+  const heredoc = lines => `#### used Bash 3ms\n\n**command:**\n\n${fenced(`$ cat > a.py <<'EOF'\n${lines}\nEOF`, 'bash')}\n\n**stdout:**\n\n${fenced('(no output)')}`;
+  const body = Array.from({ length: 30 }, (_, i) => `def handler_${i}(request): return validate(request, limit=${i * 7})`).join('\n');
+  const raw = [
+    '## 👤 User\n\nplease do it', '## 🤖 Assistant',
+    `#### Thought for 5s\n\n${['a', 'b', 'c', 'd', 'e', 'f'].map(tag => tag.repeat(400)).join('\n\n')}`,
+    `#### used Bash 1ms\n\n${outputBlock(rows('first'))}`, `#### used Bash 2ms\n\n${outputBlock(rows('second'))}`,
+    heredoc(body), heredoc(body), 'All done.',
+  ].join('\n\n');
+  const index = P.buildMarkdownIndex(raw);
+  const run = (mode, stage) => {
+    const original = P[stage];
+    P[stage] = stage ? () => { throw new Error('boom'); } : original;
+    try { return P.compressIndex(index, { mode }); } finally { P[stage] = original; }
+  };
+  const whole = P.compressIndex(index, { mode: 'stubs' });
+  assert.ok(whole.stats.stubbed > 0 && whole.stats.thoughtsCondensed > 0, 'the sample reaches every stage');
+  const lossless = P.compressIndex(index, { mode: 'lossless' });
+  for (const stage of ['compactFraming', 'compactCommands', 'compressStubs', 'applyThoughtCondensation', 'compactStdoutBlock',
+    'analyzeExecutionDiagnostics', 'collapsePassingRuns', 'stripTerminalNoise', 'buildDocumentIndex']) {
+    for (const mode of ['smart', 'stubs']) {
+      const result = run(mode, stage);
+      assert.equal(result.bytes, utf8(result.markdown), `${mode} without ${stage}: bytes`);
+      assert.equal(result.estimatedTokens, P.measureMarkdown(result.markdown).estimatedTokens, `${mode} without ${stage}: tokens`);
+      assert.ok(result.bytes <= lossless.bytes, `${mode} without ${stage}: still no larger than Lossless`);
+    }
+  }
+  // Losing the log module hands the clip back to the earlier implementation, which still shortens long output.
+  assert.match(run('smart', 'compactStdoutBlock').markdown, /omitted \d+ middle lines \(exit status not reported/);
+  // Losing the indexer fails closed: nothing that could touch protected text is edited.
+  assert.equal(run('stubs', 'buildDocumentIndex').markdown, raw);
+});
+

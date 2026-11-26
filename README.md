@@ -36,17 +36,24 @@ that tab stops the in-tab task.
   very large pages (the document is hard-capped at 128 KiB) and is produced only for the run; nothing
   is logged during the export itself. The popup shows a compact summary and offers a
   **Download profile (JSON)** button. Disable it to keep a run free of profiling overhead.
-- **Compress history** (default on) — choose one of three deterministic modes:
+- **Compress history** (default on) — choose one of four deterministic modes. In every mode your
+  messages, the final assistant answers and code quoted in prose are left exactly as exported:
   - **Lossless** — exact duplicate tool outputs are kept once; repeated blocks link to the original.
-  - **Smart** — Lossless plus ANSI/progress-noise removal, collapsing long consecutive passing-test
-    runs, and head/tail previews for very large clean command logs. Error output is retained.
-    Smart/Stubs also remove redundant single-Bash/empty-read headings and render short,
+  - **Smart** — Lossless plus ANSI/progress-noise removal, folded passing-test runs (pytest dot runs,
+    `✓` lists), `grep`/`rg` hits grouped by file, GitHub REST link boilerplate dropped, very wide
+    lines clipped, and a head/tail preview for large clean command logs (at most about 2.4 KB per
+    block). A context-aware classifier keeps failing runs whole: output of a non-zero exit or with
+    stderr, tracebacks, failing tests and compiler errors lose only terminal noise and passing
+    lines. Smart/Stubs also remove redundant single-Bash/empty-read headings and render short,
     single-line shell commands as compact callouts without changing command text. Multiline,
     backtick-containing and anchored commands keep their full fences; Off/Lossless keep raw framing.
-  - **Stubs** — Smart plus references to identical consecutive lines already present in an
-    earlier read or heredoc write of the same file. Unlike the former version, it does not
-    discard different file versions or non-overlapping ranges merely because the path matches.
-    **Smart and Stubs are lossy**: Smart can still shorten unique long clean output.
+  - **Stubs** — Smart plus references to identical lines already present in an earlier output
+    (content-defined, so any read, write or file card can be the source; `cat -n` numbering is
+    ignored when matching), shortened clean inline Python/Node scripts and unchanged `git diff`
+    context (runs whose heading says `exit 0`), and a tighter head/tail budget of about 1.2 KB per
+    block. Sources of references keep every line. It does not discard different file versions or
+    non-overlapping ranges merely because the path matches.
+    **Smart and Stubs are lossy**: they can still shorten unique long clean output.
   - **Off** — turn compression off to export the raw Markdown.
 - **Condense long reasoning** (default on; Smart and Stubs only) — shortens the middle of long
   `Thought` sections. Smart keeps the first two and last two blocks of a Thought over 2,600 B with at
